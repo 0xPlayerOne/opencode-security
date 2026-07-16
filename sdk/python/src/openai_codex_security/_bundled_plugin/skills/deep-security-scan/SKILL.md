@@ -28,6 +28,8 @@ Do not jump from the discovery manifest directly to completion. A returned `mani
 
 Use the setup workspace only when host context explicitly says this is the Codex desktop app and both `open_codex_security_workspace` and `await_codex_security_scan_start` are available. Tool availability alone does not prove the host is the desktop app.
 
+The workspace tool enforces the persisted setup preference. When setup is disabled it returns `status: "setup_disabled"` without creating or rendering a workspace. Treat that result as authoritative even when a matching stale or unsubmitted setup workspace exists: do not await setup or ask the user to finish the old workspace, and continue through the prompt-only target route after its required preflight.
+
 Scanbench and Promptfoo evaluations are headless runs even when MCP app tools are listed. On those paths, never call `open_codex_security_workspace` or `await_codex_security_scan_start`; use the target-form `start_codex_security_deep_scan` path.
 
 For a new desktop scan:
@@ -35,10 +37,11 @@ For a new desktop scan:
 1. Resolve only the setup arguments from the user request: local `targetPath`, `mode: "deep"`, `scope: "."`, and only user-supplied security focus as `userContext`. For a scoped-path request, use the scoped directory itself as `targetPath`.
 2. Do not inspect repository code, run capability preflight, create a goal, or start discovery before setup opens.
 3. Call `open_codex_security_workspace`.
-4. Immediately call `await_codex_security_scan_start` with its `sessionId` and wait for the user to press **Start scan**.
+4. If opening returns `status: "setup_disabled"`, continue at step 6 without calling the wait tool. Otherwise, require its `sessionId`, immediately call `await_codex_security_scan_start`, and wait for the user to press **Start scan** or choose **Don't show setup again**.
 5. On `status: "started"`, require `scanId`, load `get_codex_security_scan_context`, and pass `handoffClaimToken` when present.
-6. On `status: "already_delivered"`, end the turn because another continuation owns the scan.
-7. On `status: "timed_out"`, end the turn and tell the user to finish setup and use **Continue in Codex**. Do not open another workspace or switch to a terminal workflow.
+6. On `status: "setup_disabled"`, no scan was created. Resolve the same target, scope, and optional user context from the original prompt and immediately use the prompt-only target form of `start_codex_security_deep_scan`. Do not reopen or await setup.
+7. On `status: "already_delivered"`, end the turn because another continuation owns the scan.
+8. On `status: "timed_out"`, end the turn and tell the user to finish setup and use **Continue in Codex**. Do not open another workspace or switch to a terminal workflow.
 
 For a desktop continuation that already includes `scanId`, load `get_codex_security_scan_context` directly and pass `handoffClaimToken` when present. If its validated mode is not `deep`, route to the matching top-level Codex Security skill.
 

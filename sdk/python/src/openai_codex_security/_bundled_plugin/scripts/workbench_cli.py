@@ -26,6 +26,8 @@ def parse_args(description: str) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=description)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    subparsers.add_parser("get-setup-preference")
+
     create_workspace = subparsers.add_parser("create-workspace")
     create_workspace.add_argument("--workspace-id", required=True)
     create_workspace.add_argument("--thread-id")
@@ -109,6 +111,22 @@ def parse_args(description: str) -> argparse.Namespace:
     start_scan = subparsers.add_parser("start-scan")
     start_scan.add_argument("--workspace-id", required=True)
     start_scan.add_argument("--scan-root")
+
+    disable_setup_ui = subparsers.add_parser("disable-setup-ui")
+    disable_setup_ui.add_argument("--workspace-id", required=True)
+
+    start_prompt_only_scan = subparsers.add_parser("start-prompt-only-scan")
+    start_prompt_only_scan.add_argument("--thread-id", required=True)
+    start_prompt_only_scan.add_argument("--target-path", required=True)
+    start_prompt_only_scan.add_argument("--scope", required=True)
+    start_prompt_only_scan.add_argument("--mode", choices=("diff", "standard"), required=True)
+    start_prompt_only_scan.add_argument("--target-summary")
+    start_prompt_only_scan.add_argument("--user-context")
+    start_prompt_only_scan.add_argument("--diff-target-kind", choices=DIFF_TARGET_KINDS)
+    start_prompt_only_scan.add_argument("--diff-base-revision")
+    start_prompt_only_scan.add_argument("--diff-head-revision")
+    start_prompt_only_scan.add_argument("--diff-content-digest")
+    start_prompt_only_scan.add_argument("--scan-root")
 
     deep_scan.register_subcommands(subparsers, positive_int)
 

@@ -494,6 +494,17 @@ MIGRATIONS = (
         WHERE handoff_status = 'delivered';
         """,
     ),
+    (
+        19,
+        "persist setup workspace preference",
+        """
+        CREATE TABLE setup_preferences (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            skip_setup_ui INTEGER NOT NULL CHECK (skip_setup_ui IN (0, 1)),
+            updated_at TEXT NOT NULL
+        );
+        """,
+    ),
 )
 
 

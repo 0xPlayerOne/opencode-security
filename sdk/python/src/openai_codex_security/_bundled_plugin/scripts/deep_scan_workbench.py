@@ -517,6 +517,13 @@ def pending_deep_workspace_for_target(
     ).fetchone()
 
 
+def setup_ui_opt_out_enabled(connection: sqlite3.Connection) -> bool:
+    row = connection.execute(
+        "SELECT skip_setup_ui FROM setup_preferences WHERE singleton = 1"
+    ).fetchone()
+    return row is not None and bool(row["skip_setup_ui"])
+
+
 def begin_deep_scan_for_scan(
     connection: sqlite3.Connection,
     scan_id: str,
@@ -567,12 +574,6 @@ def begin_deep_scan_for_target(
     existing = existing_deep_scan_for_target(connection, thread_id, target_path, scope)
     if existing is not None:
         return begin_deep_scan_for_scan(connection, existing["id"], thread_id, args)
-    if pending_deep_workspace_for_target(connection, thread_id, target_path, scope) is not None:
-        raise SystemExit(
-            "A matching Codex Security setup workspace is waiting for Start scan. "
-            "Finish that setup and retry with its scanId."
-        )
-
     target_metadata = target.stat()
     revision = git_revision(target)
     target_snapshot_digest = (
@@ -604,7 +605,10 @@ def begin_deep_scan_for_target(
                 existing["id"],
                 start_disposition="joined" if existing_run is not None else "created",
             )
-        if pending_deep_workspace_for_target(connection, thread_id, target_path, scope) is not None:
+        pending_workspace = pending_deep_workspace_for_target(
+            connection, thread_id, target_path, scope
+        )
+        if pending_workspace is not None and not setup_ui_opt_out_enabled(connection):
             raise SystemExit(
                 "A matching Codex Security setup workspace is waiting for Start scan. "
                 "Finish that setup and retry with its scanId."
