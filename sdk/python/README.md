@@ -153,3 +153,10 @@ codex-security scan . --json
 ```
 
 This project is licensed under the [Apache-2.0 License](LICENSE).
+
+## TypeScript migration skeleton
+
+An ESM TypeScript SDK and CLI package is being introduced alongside the authoritative
+Python implementation. See
+[`compatibility/PARITY_MATRIX.md`](compatibility/PARITY_MATRIX.md) for the cutover
+contract and intentional language-level differences.
