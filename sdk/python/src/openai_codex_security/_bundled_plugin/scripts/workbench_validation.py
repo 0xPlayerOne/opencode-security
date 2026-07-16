@@ -6,8 +6,6 @@ import argparse
 import sqlite3
 import uuid
 
-RECOVERY_HANDOFF_TOKEN_PREFIX = "recovery_"
-
 
 def require_uuid(value: str, label: str) -> str:
     try:
@@ -35,44 +33,6 @@ def require_occurrence(connection: sqlite3.Connection, occurrence_id: str) -> sq
     if row is None:
         raise SystemExit("Codex Security finding occurrence not found.")
     return row
-
-
-def require_handoff_claim_token(value: str) -> str:
-    recovery_token = value.startswith(RECOVERY_HANDOFF_TOKEN_PREFIX)
-    token = value.removeprefix(RECOVERY_HANDOFF_TOKEN_PREFIX) if recovery_token else value
-    normalized = require_uuid(token, "claim-token")
-    return f"{RECOVERY_HANDOFF_TOKEN_PREFIX}{normalized}" if recovery_token else normalized
-
-
-def require_current_continuation(
-    scan: sqlite3.Row,
-    claim_token: str | None,
-    *,
-    error_message: str,
-) -> None:
-    if (
-        scan["handoff_status"] == "delivered"
-        and scan["handoff_claim_token"] is None
-        and claim_token is None
-    ):
-        return
-    if claim_token is None:
-        raise SystemExit(error_message)
-    if scan["handoff_claim_token"] != require_handoff_claim_token(claim_token):
-        raise SystemExit(error_message)
-
-
-def validate_handoff_delivery_thread(
-    owning_thread_id: str | None,
-    requesting_thread_id: str,
-    claim_token: str,
-) -> None:
-    if owning_thread_id != requesting_thread_id and not claim_token.startswith(
-        RECOVERY_HANDOFF_TOKEN_PREFIX
-    ):
-        raise SystemExit(
-            "A scan handoff can only be marked delivered from its owning Codex thread."
-        )
 
 
 def main() -> None:

@@ -52,6 +52,7 @@ from finalize_scan_contract import (
     write_scan_local_bytes,
 )
 from finding_preview import bounded_finding_details
+from workbench import handoff
 from workbench_cli import parse_args
 from workbench_constants import (
     ARTIFACTS,
@@ -95,11 +96,8 @@ from workbench_target import (
 from workbench_target_state import backfill_security_targets, ensure_security_target
 from workbench_validation import (
     optional_text,
-    require_current_continuation,
-    require_handoff_claim_token,
     require_occurrence,
     require_uuid,
-    validate_handoff_delivery_thread,
 )
 
 FINDING_ARTIFACT_DIRECTORIES_LIMIT = 80
@@ -1622,7 +1620,7 @@ def complete_scan_locked(
         return scan_context(connection, scan["id"])
     if scan["status"] != "running":
         raise SystemExit("Only a running scan can be completed.")
-    require_current_continuation(
+    handoff.require_current_continuation(
         scan,
         claim_token,
         error_message="Scan completion is owned by another continuation.",
@@ -1657,7 +1655,7 @@ def complete_scan_locked(
         if scan["status"] != "running":
             raise SystemExit("Only a running scan can be completed.")
         deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
-        require_current_continuation(
+        handoff.require_current_continuation(
             scan,
             claim_token,
             error_message="Scan completion is owned by another continuation.",
@@ -1709,7 +1707,7 @@ def fail_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[
             return scan_context(connection, scan["id"])
         if scan["status"] == "complete":
             raise SystemExit("A completed scan cannot be marked failed.")
-        require_current_continuation(
+        handoff.require_current_continuation(
             scan,
             args.claim_token,
             error_message="Scan failure is owned by another continuation.",
@@ -1776,160 +1774,6 @@ def cancel_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dic
         )
         if progress_updated.rowcount != 1:
             raise SystemExit("Codex Security scan progress not found.")
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
-    return workspace_state(connection, scan["workspace_id"])
-
-
-def claim_handoff_delivery(
-    connection: sqlite3.Connection, args: argparse.Namespace
-) -> dict[str, Any]:
-    scan_id = require_uuid(args.scan_id, "scan-id")
-    claim_token = require_handoff_claim_token(args.claim_token)
-    timestamp = now()
-    with connection:
-        scan = require_scan(connection, scan_id)
-        if scan["handoff_status"] != "pending" or scan["handoff_claim_token"] == claim_token:
-            return workspace_state(connection, scan["workspace_id"])
-        updated = connection.execute(
-            """
-            UPDATE scans
-            SET handoff_claimed_at = ?, handoff_claim_token = ?,
-                continuation_thread_id = CASE
-                    WHEN handoff_claim_token IS NULL THEN continuation_thread_id
-                    ELSE NULL
-                END,
-                deep_scan_owner_thread_id = CASE
-                    WHEN handoff_claim_token IS NULL THEN deep_scan_owner_thread_id
-                    ELSE NULL
-                END,
-                updated_at = ?
-            WHERE id = ? AND handoff_status = 'pending'
-                AND (
-                    handoff_claim_token IS NULL
-                    OR (
-                        ? = 1
-                        AND (handoff_claimed_at IS NULL OR handoff_claimed_at <= ?)
-                    )
-                )
-            """,
-            (
-                timestamp,
-                claim_token,
-                timestamp,
-                scan["id"],
-                int(args.take_over_stale),
-                stale_claim_before(),
-            ),
-        )
-        if updated.rowcount != 1:
-            return workspace_state(connection, scan["workspace_id"])
-    return workspace_state(connection, scan["workspace_id"])
-
-
-def release_handoff_delivery(
-    connection: sqlite3.Connection, args: argparse.Namespace
-) -> dict[str, Any]:
-    scan_id = require_uuid(args.scan_id, "scan-id")
-    claim_token = require_handoff_claim_token(args.claim_token)
-    timestamp = now()
-    with connection:
-        scan = require_scan(connection, scan_id)
-        connection.execute(
-            """
-            UPDATE scans
-            SET handoff_claimed_at = NULL, handoff_claim_token = NULL,
-                continuation_thread_id = NULL, deep_scan_owner_thread_id = NULL,
-                updated_at = ?
-            WHERE id = ? AND handoff_status = 'pending'
-                AND handoff_claim_token = ?
-            """,
-            (timestamp, scan["id"], claim_token),
-        )
-    return workspace_state(connection, scan["workspace_id"])
-
-
-def attach_scan_continuation_thread(
-    connection: sqlite3.Connection, args: argparse.Namespace
-) -> dict[str, Any]:
-    scan_id = require_uuid(args.scan_id, "scan-id")
-    claim_token = require_handoff_claim_token(args.claim_token)
-    thread_id = optional_text(args.thread_id, maximum=512)
-    if thread_id is None:
-        raise SystemExit("Codex Security continuation thread ID is required.")
-    connection.execute("BEGIN IMMEDIATE")
-    try:
-        timestamp = now()
-        scan = require_scan(connection, scan_id)
-        if scan["handoff_claim_token"] != claim_token:
-            raise SystemExit("Codex Security continuation thread claim token does not match.")
-        if scan["continuation_thread_id"] is not None:
-            if scan["continuation_thread_id"] != thread_id:
-                raise SystemExit(
-                    "Codex Security scan continuation is owned by another continuation."
-                )
-            connection.commit()
-            return workspace_state(connection, scan["workspace_id"])
-        updated = connection.execute(
-            """
-            UPDATE scans
-            SET continuation_thread_id = ?,
-                deep_scan_owner_thread_id = CASE
-                    WHEN mode = 'deep' THEN ? ELSE deep_scan_owner_thread_id
-                END,
-                updated_at = ?
-            WHERE id = ? AND continuation_thread_id IS NULL
-                AND handoff_claim_token = ?
-            """,
-            (thread_id, thread_id, timestamp, scan["id"], claim_token),
-        )
-        if updated.rowcount != 1:
-            raise SystemExit("Codex Security continuation thread could not be attached.")
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
-    return workspace_state(connection, scan["workspace_id"])
-
-
-def mark_handoff_delivered(
-    connection: sqlite3.Connection, args: argparse.Namespace
-) -> dict[str, Any]:
-    scan_id = require_uuid(args.scan_id, "scan-id")
-    claim_token = require_handoff_claim_token(args.claim_token)
-    thread_id = optional_text(args.thread_id, maximum=512)
-    connection.execute("BEGIN IMMEDIATE")
-    try:
-        timestamp = now()
-        scan = require_scan(connection, scan_id)
-        if thread_id is not None:
-            workspace = require_workspace(connection, scan["workspace_id"])
-            validate_handoff_delivery_thread(
-                scan["continuation_thread_id"] or workspace["thread_id"],
-                thread_id,
-                claim_token,
-            )
-        if scan["handoff_status"] == "delivered":
-            if scan["handoff_claim_token"] != claim_token:
-                raise SystemExit(
-                    "Codex Security handoff delivery is owned by another continuation."
-                )
-            connection.commit()
-            return workspace_state(connection, scan["workspace_id"])
-        updated = connection.execute(
-            """
-            UPDATE scans
-            SET handoff_status = 'delivered', handoff_claimed_at = NULL,
-                updated_at = ?
-            WHERE id = ? AND handoff_status = 'pending'
-                AND handoff_claim_token = ?
-            """,
-            (timestamp, scan["id"], claim_token),
-        )
-        if updated.rowcount != 1:
-            raise SystemExit("Codex Security handoff delivery could not be recorded.")
         connection.commit()
     except BaseException:
         connection.rollback()
@@ -3713,13 +3557,39 @@ def main() -> None:
         elif args.command == "fail-scan":
             result = fail_scan(connection, args)
         elif args.command == "mark-handoff-delivered":
-            result = mark_handoff_delivered(connection, args)
+            result = handoff.mark_handoff_delivered(
+                connection,
+                args,
+                now=now,
+                require_scan=require_scan,
+                require_workspace=require_workspace,
+                workspace_state=workspace_state,
+            )
         elif args.command == "claim-handoff-delivery":
-            result = claim_handoff_delivery(connection, args)
+            result = handoff.claim_handoff_delivery(
+                connection,
+                args,
+                now=now,
+                require_scan=require_scan,
+                stale_claim_before=stale_claim_before,
+                workspace_state=workspace_state,
+            )
         elif args.command == "release-handoff-delivery":
-            result = release_handoff_delivery(connection, args)
+            result = handoff.release_handoff_delivery(
+                connection,
+                args,
+                now=now,
+                require_scan=require_scan,
+                workspace_state=workspace_state,
+            )
         elif args.command == "attach-scan-continuation-thread":
-            result = attach_scan_continuation_thread(connection, args)
+            result = handoff.attach_scan_continuation_thread(
+                connection,
+                args,
+                now=now,
+                require_scan=require_scan,
+                workspace_state=workspace_state,
+            )
         elif args.command == "set-finding-triage":
             result = set_finding_triage(connection, args)
         elif args.command == "request-finding-remediation":

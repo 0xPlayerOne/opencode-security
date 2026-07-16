@@ -7,8 +7,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workbench.handoff import require_current_continuation
 from workbench_constants import PHASES
-from workbench_validation import require_current_continuation, require_uuid
+from workbench_validation import require_uuid
 
 
 def reportable_count(

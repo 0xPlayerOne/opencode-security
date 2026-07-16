@@ -15,13 +15,14 @@ from typing import Any, Callable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from deep_scan_config import resolve_deep_scan_config
 from filesystem_identity import serialize_filesystem_identity
+from workbench.handoff import require_current_continuation
 from workbench_target import (
     directory_content_digest,
     directory_snapshot_regular_file_count,
     git_revision,
     worktree_content_digest,
 )
-from workbench_validation import optional_text, require_current_continuation, require_uuid
+from workbench_validation import optional_text, require_uuid
 
 DEEP_SCAN_WORKER_KINDS = ("setup", "discovery", "dedup")
 DEEP_SCAN_WORKER_STATUSES = ("queued", "running", "succeeded", "failed", "canceled")
