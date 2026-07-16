@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workbench_constants import PHASES
-from workbench_validation import require_uuid
+from workbench_validation import require_current_continuation, require_uuid
 
 
 def reportable_count(
@@ -34,6 +34,11 @@ def update_progress(
         scan = require_scan(connection, scan_id)
         if scan["status"] != "running":
             raise SystemExit("Only a running scan can update progress.")
+        require_current_continuation(
+            scan,
+            args.claim_token,
+            error_message="Scan updates are owned by another continuation.",
+        )
         if args.deep_review_pass is not None and scan["mode"] != "deep":
             raise SystemExit("Only Deep Scan can record a deep review pass.")
         progress = connection.execute(

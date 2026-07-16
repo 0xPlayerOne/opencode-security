@@ -344,6 +344,21 @@ def directory_content_digest(target: Path, *, excluded: tuple[Path, ...] = ()) -
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
 
 
+def directory_snapshot_regular_file_count(target: Path) -> int:
+    paths = git_directory_snapshot_paths(target)
+    if paths is None:
+        paths = sorted(target.rglob("*"))
+    count = 0
+    for path in paths:
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise SystemExit(f"Could not inspect local file: {path.relative_to(target)}") from exc
+        if stat.S_ISREG(metadata.st_mode):
+            count += 1
+    return count
+
+
 def copy_directory_excluding(source: Path, destination: Path, excluded: tuple[Path, ...]) -> None:
     excluded_relative = []
     for path in excluded:

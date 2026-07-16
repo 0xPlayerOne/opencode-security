@@ -15,8 +15,13 @@ from typing import Any, Callable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from deep_scan_config import resolve_deep_scan_config
 from filesystem_identity import serialize_filesystem_identity
-from workbench_target import directory_content_digest, git_revision, worktree_content_digest
-from workbench_validation import optional_text, require_uuid
+from workbench_target import (
+    directory_content_digest,
+    directory_snapshot_regular_file_count,
+    git_revision,
+    worktree_content_digest,
+)
+from workbench_validation import optional_text, require_current_continuation, require_uuid
 
 DEEP_SCAN_WORKER_KINDS = ("setup", "discovery", "dedup")
 DEEP_SCAN_WORKER_STATUSES = ("queued", "running", "succeeded", "failed", "canceled")
@@ -33,6 +38,7 @@ def register_subcommands(subparsers: Any, positive_int: Callable[[str], int]) ->
     begin_deep_scan.add_argument("--scope", default=".")
     begin_deep_scan.add_argument("--user-context")
     begin_deep_scan.add_argument("--scan-root")
+    begin_deep_scan.add_argument("--claim-token")
     begin_deep_scan.add_argument("--available-parallelism", type=positive_int)
     begin_deep_scan.add_argument("--workflow-version", default=DEEP_SCAN_WORKFLOW_VERSION)
 
@@ -108,6 +114,7 @@ class DeepScanDependencies:
     require_remediation_target: Callable[[str], Path]
     require_scannable_target: Callable[[Path], None]
     require_scope: Callable[[str, str, Path], str]
+    ensure_security_target: Callable[[sqlite3.Connection, str], str]
     require_canonical_scan_directory: Callable[[Path], Path]
     safe_segment: Callable[[str], str]
     compact_timestamp: Callable[[], str]
@@ -157,6 +164,10 @@ def require_scannable_target(target: Path) -> None:
 
 def require_scope(scope: str, mode: str, target: Path) -> str:
     return dependencies().require_scope(scope, mode, target)
+
+
+def ensure_security_target(connection: sqlite3.Connection, target_path: str) -> str:
+    return dependencies().ensure_security_target(connection, target_path)
 
 
 def require_canonical_scan_directory(scan_dir: Path) -> Path:
@@ -513,6 +524,11 @@ def begin_deep_scan_for_scan(
 ) -> dict[str, Any]:
     scan_id = require_uuid(scan_id, "scan-id")
     scan, _ = require_owned_scan(connection, scan_id, thread_id)
+    require_current_continuation(
+        scan,
+        args.claim_token,
+        error_message="Deep Scan orchestration is owned by another continuation.",
+    )
     if scan["mode"] != "deep":
         raise SystemExit("Deep Scan orchestration requires a scan in deep mode.")
     existing = connection.execute(
@@ -527,6 +543,11 @@ def begin_deep_scan_for_scan(
     connection.execute("BEGIN IMMEDIATE")
     try:
         scan, _ = require_owned_scan(connection, scan_id, thread_id)
+        require_current_continuation(
+            scan,
+            args.claim_token,
+            error_message="Deep Scan orchestration is owned by another continuation.",
+        )
         ensure_deep_scan_run(connection, scan, config, workflow_version, now())
         connection.commit()
     except BaseException:
@@ -560,6 +581,9 @@ def begin_deep_scan_for_target(
     )
     target_device = serialize_filesystem_identity(target_metadata.st_dev)
     target_inode = serialize_filesystem_identity(target_metadata.st_ino)
+    scope_file_count = directory_snapshot_regular_file_count(
+        target if scope == "." else target / scope
+    )
     connection.execute("BEGIN IMMEDIATE")
     try:
         existing = existing_deep_scan_for_target(connection, thread_id, target_path, scope)
@@ -625,6 +649,7 @@ def begin_deep_scan_for_target(
         workspace_id = str(uuid.uuid4())
         scan_id = str(uuid.uuid4())
         timestamp = now()
+        target_id = ensure_security_target(connection, target_path)
         scan_dir = Path(
             tempfile.mkdtemp(
                 prefix=f"{safe_segment(revision)}_{compact_timestamp()}_",
@@ -634,13 +659,14 @@ def begin_deep_scan_for_target(
         connection.execute(
             """
             INSERT INTO workspaces (
-                id, thread_id, target_path, target_title, default_scope, default_mode,
+                id, thread_id, target_id, target_path, target_title, default_scope, default_mode,
                 user_context, submitted, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, 'deep', ?, 1, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, 'deep', ?, 1, ?, ?)
             """,
             (
                 workspace_id,
                 thread_id,
+                target_id,
                 target_path,
                 target.name,
                 scope,
@@ -652,16 +678,17 @@ def begin_deep_scan_for_target(
         connection.execute(
             """
             INSERT INTO scans (
-                id, workspace_id, target_path, target_revision, target_snapshot_digest,
+                id, workspace_id, target_id, target_path, target_revision, target_snapshot_digest,
                 target_device, target_inode, scope, mode, user_context,
                 deep_scan_owner_thread_id, scan_dir, status, phase, handoff_status,
                 started_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'deep', ?, ?, ?, 'running', 'preflight',
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'deep', ?, ?, ?, 'running', 'preflight',
                 'delivered', ?, ?, ?)
             """,
             (
                 scan_id,
                 workspace_id,
+                target_id,
                 target_path,
                 revision,
                 target_snapshot_digest,
@@ -679,11 +706,11 @@ def begin_deep_scan_for_target(
         connection.execute(
             """
             INSERT INTO scan_progress (
-                scan_id, review_items_total, review_items_completed,
+                scan_id, scope_file_count, review_items_total, review_items_completed,
                 reportable_findings_count, updated_at
-            ) VALUES (?, 0, 0, 0, ?)
+            ) VALUES (?, ?, 0, 0, 0, ?)
             """,
-            (scan_id, timestamp),
+            (scan_id, scope_file_count, timestamp),
         )
         connection.execute(
             "UPDATE workspaces SET active_scan_id = ?, updated_at = ? WHERE id = ?",
@@ -706,6 +733,8 @@ def begin_deep_scan(connection: sqlite3.Connection, args: argparse.Namespace) ->
         if args.user_context is not None or args.scope != ".":
             raise SystemExit("scan-id cannot be combined with target setup fields.")
         return begin_deep_scan_for_scan(connection, args.scan_id, thread_id, args)
+    if args.claim_token is not None:
+        raise SystemExit("claim-token is only valid with scan-id.")
     return begin_deep_scan_for_target(connection, args, thread_id)
 
 

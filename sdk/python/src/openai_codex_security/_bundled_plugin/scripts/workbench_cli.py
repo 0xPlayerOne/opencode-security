@@ -128,17 +128,20 @@ def parse_args(description: str) -> argparse.Namespace:
     update_progress.add_argument("--review-items-completed", type=non_negative_int)
     update_progress.add_argument("--reportable-findings-count", type=non_negative_int)
     update_progress.add_argument("--deep-review-pass", type=positive_int)
+    update_progress.add_argument("--claim-token")
 
     complete_scan = subparsers.add_parser("complete-scan")
     complete_scan.add_argument("--scan-id", required=True)
+    complete_scan.add_argument("--claim-token")
 
     cancel_scan = subparsers.add_parser("cancel-scan")
     cancel_scan.add_argument("--scan-id", required=True)
-    cancel_scan.add_argument("--thread-id", required=True)
+    cancel_scan.add_argument("--thread-id")
 
     fail_scan = subparsers.add_parser("fail-scan")
     fail_scan.add_argument("--scan-id", required=True)
     fail_scan.add_argument("--message", required=True)
+    fail_scan.add_argument("--claim-token")
 
     mark_handoff_delivered = subparsers.add_parser("mark-handoff-delivered")
     mark_handoff_delivered.add_argument("--scan-id", required=True)
@@ -153,6 +156,11 @@ def parse_args(description: str) -> argparse.Namespace:
     release_handoff_delivery = subparsers.add_parser("release-handoff-delivery")
     release_handoff_delivery.add_argument("--scan-id", required=True)
     release_handoff_delivery.add_argument("--claim-token", required=True)
+
+    attach_scan_continuation_thread = subparsers.add_parser("attach-scan-continuation-thread")
+    attach_scan_continuation_thread.add_argument("--scan-id", required=True)
+    attach_scan_continuation_thread.add_argument("--claim-token", required=True)
+    attach_scan_continuation_thread.add_argument("--thread-id", required=True)
 
     set_finding_triage = subparsers.add_parser("set-finding-triage")
     set_finding_triage.add_argument("--occurrence-id", required=True)

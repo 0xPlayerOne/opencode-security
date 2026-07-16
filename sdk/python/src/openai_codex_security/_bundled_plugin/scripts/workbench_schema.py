@@ -385,6 +385,115 @@ MIGRATIONS = (
         );
         """,
     ),
+    (
+        12,
+        "scan continuation threads",
+        """
+        ALTER TABLE scans
+        ADD COLUMN continuation_thread_id TEXT;
+        """,
+    ),
+    (
+        13,
+        "scan scope file counts",
+        """
+        ALTER TABLE scan_progress
+        ADD COLUMN scope_file_count INTEGER
+            CHECK (scope_file_count >= 0);
+        """,
+    ),
+    (
+        14,
+        "imported triage results",
+        """
+        CREATE TABLE triage_results (
+            id TEXT PRIMARY KEY,
+            repository_path TEXT NOT NULL,
+            repository_revision TEXT,
+            finding_count INTEGER NOT NULL CHECK (finding_count >= 0),
+            result_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX triage_results_by_updated_at
+        ON triage_results(updated_at DESC, id);
+        """,
+    ),
+    (
+        15,
+        "append-only finding decisions",
+        """
+        CREATE TABLE finding_decisions (
+            id TEXT PRIMARY KEY,
+            occurrence_id TEXT NOT NULL REFERENCES finding_occurrences(id) ON DELETE CASCADE,
+            status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
+            close_reason TEXT CHECK (
+                close_reason IS NULL OR close_reason IN ('already_fixed', 'wont_fix', 'false_positive')
+            ),
+            note TEXT,
+            created_at TEXT NOT NULL,
+            CHECK (
+                (status = 'open' AND close_reason IS NULL)
+                OR (status = 'closed' AND close_reason IS NOT NULL)
+            )
+        );
+
+        CREATE INDEX finding_decisions_by_occurrence
+        ON finding_decisions(occurrence_id, created_at DESC, id DESC);
+
+        INSERT INTO finding_decisions (
+            id, occurrence_id, status, close_reason, note, created_at
+        )
+        SELECT
+            'legacy_' || occurrence_id,
+            occurrence_id,
+            status,
+            close_reason,
+            note,
+            updated_at
+        FROM finding_triage;
+        """,
+    ),
+    (
+        16,
+        "stable repository targets",
+        """
+        CREATE TABLE security_targets (
+            id TEXT PRIMARY KEY,
+            current_path TEXT NOT NULL UNIQUE,
+            display_name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        ALTER TABLE workspaces
+        ADD COLUMN target_id TEXT REFERENCES security_targets(id);
+
+        ALTER TABLE scans
+        ADD COLUMN target_id TEXT REFERENCES security_targets(id);
+
+        CREATE INDEX scans_by_target
+        ON scans(target_id, started_at DESC, id);
+        """,
+    ),
+    (
+        17,
+        "scan target summaries",
+        """
+        ALTER TABLE scans
+        ADD COLUMN target_summary TEXT;
+        """,
+    ),
+    (
+        18,
+        "clear legacy delivered handoff claims",
+        """
+        UPDATE scans
+        SET handoff_claimed_at = NULL, handoff_claim_token = NULL
+        WHERE handoff_status = 'delivered';
+        """,
+    ),
 )
 
 

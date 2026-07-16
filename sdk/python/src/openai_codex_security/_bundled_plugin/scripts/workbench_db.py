@@ -82,6 +82,7 @@ from workbench_target import (
     copy_directory_excluding,
     copy_git_worktree_files,
     directory_content_digest,
+    directory_snapshot_regular_file_count,
     git_command,
     git_output,
     git_revision,
@@ -91,8 +92,10 @@ from workbench_target import (
     worktree_content_digest,
     worktree_content_digest_for_context,
 )
+from workbench_target_state import backfill_security_targets, ensure_security_target
 from workbench_validation import (
     optional_text,
+    require_current_continuation,
     require_handoff_claim_token,
     require_occurrence,
     require_uuid,
@@ -136,7 +139,7 @@ def state_dir() -> Path:
     if state_dir:
         return Path(state_dir).expanduser().resolve()
     codex_home = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
-    return codex_home / "state" / "plugins" / "codex-security"
+    return (codex_home / "state" / "plugins" / "codex-security").resolve()
 
 
 def database_path() -> Path:
@@ -260,6 +263,8 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
                 "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
                 (version, name, now()),
             )
+        if 16 not in applied:
+            backfill_security_targets(connection)
         connection.commit()
     except BaseException:
         connection.rollback()
@@ -760,11 +765,6 @@ def require_scannable_target(target: Path) -> None:
         )
 
 
-def stable_target_id(target: Path) -> str:
-    digest = hashlib.sha256(f"local-workspace\0{target}".encode()).hexdigest()
-    return f"target_sha256_{digest}"
-
-
 def expected_target_kinds(scan: sqlite3.Row) -> list[str]:
     if scan["mode"] == "diff":
         return ["git_diff"]
@@ -795,7 +795,7 @@ def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
     target_contract = {
         "allowedKinds": expected_target_kinds(scan),
         "displayName": target.name,
-        "targetId": stable_target_id(target),
+        "targetId": scan["target_id"],
     }
     if (
         scan["mode"] != "diff"
@@ -1078,17 +1078,22 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
         checked_mode=args.mode,
     )
     with connection:
+        target_id = (
+            ensure_security_target(connection, target_path) if target_path is not None else None
+        )
         connection.execute(
             """
             INSERT INTO workspaces (
-                id, thread_id, target_path, target_title, target_summary, default_scope, default_mode,
+                id, thread_id, target_id, target_path, target_title, target_summary,
+                default_scope, default_mode,
                 user_context, diff_target_kind, diff_base_revision, diff_head_revision,
                 diff_content_digest, capability_preflight_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 workspace_id,
                 optional_text(args.thread_id, maximum=512),
+                target_id,
                 target_path,
                 optional_text(args.target_title, maximum=200),
                 optional_text(args.target_summary, maximum=2400),
@@ -1186,16 +1191,18 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
         target_summary = diff_target_summary(diff_target)
     timestamp = now()
     with connection:
+        target_id = ensure_security_target(connection, target_path)
         updated = connection.execute(
             """
             UPDATE workspaces
-            SET target_path = ?, target_title = ?, target_summary = ?, default_scope = ?,
+            SET target_id = ?, target_path = ?, target_title = ?, target_summary = ?, default_scope = ?,
                 default_mode = ?, user_context = ?, diff_target_kind = ?,
                 diff_base_revision = ?, diff_head_revision = ?, diff_content_digest = ?,
                 diff_resolution_id = NULL, submitted = 1, updated_at = ?
             WHERE id = ? AND active_scan_id IS NULL
             """,
             (
+                target_id,
                 target_path,
                 target_title,
                 target_summary,
@@ -1260,10 +1267,11 @@ def begin_diff_resolution(
     )
     timestamp = now()
     with connection:
+        target_id = ensure_security_target(connection, str(target))
         updated = connection.execute(
             """
             UPDATE workspaces
-            SET target_path = ?, target_title = ?, target_summary = NULL,
+            SET target_id = ?, target_path = ?, target_title = ?, target_summary = NULL,
                 default_scope = '.', default_mode = 'diff',
                 user_context = ?, diff_target_kind = NULL, diff_base_revision = NULL,
                 diff_head_revision = NULL, diff_content_digest = NULL,
@@ -1271,6 +1279,7 @@ def begin_diff_resolution(
             WHERE id = ? AND active_scan_id IS NULL
             """,
             (
+                target_id,
                 str(target),
                 target_title,
                 optional_text(args.user_context),
@@ -1347,12 +1356,17 @@ def set_diff_target(connection: sqlite3.Connection, args: argparse.Namespace) ->
 
 def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     workspace_id = require_uuid(args.workspace_id, "workspace-id")
+    manages_transaction = not connection.in_transaction
     try:
         workspace = require_workspace(connection, workspace_id)
         if not workspace["submitted"] or not workspace["target_path"]:
             raise SystemExit("Save the Codex Security setup before starting the scan.")
         active = connection.execute(
-            "SELECT * FROM scans WHERE workspace_id = ? AND status = 'running'",
+            """
+            SELECT *
+            FROM scans
+            WHERE workspace_id = ? AND status = 'running' AND canceled_at IS NULL
+            """,
             (workspace["id"],),
         ).fetchone()
         if active is not None:
@@ -1373,6 +1387,11 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
                 workspace["diff_head_revision"],
                 workspace["diff_content_digest"],
             )
+        target_summary = (
+            workspace["target_summary"] if workspace["default_mode"] == "diff" else None
+        )
+        if diff_target is not None and not target_summary:
+            target_summary = diff_target_summary(diff_target)
         root = (
             Path(args.scan_root).expanduser().resolve() if args.scan_root else state_dir() / "scans"
         )
@@ -1387,15 +1406,24 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
                 if revision == "unversioned"
                 else worktree_content_digest(target)
             )
+        scope_file_count = directory_snapshot_regular_file_count(
+            target if scope == "." else target / scope
+        )
         target_root.mkdir(parents=True, exist_ok=True)
-        connection.execute("BEGIN IMMEDIATE")
+        if manages_transaction:
+            connection.execute("BEGIN IMMEDIATE")
         workspace = require_workspace(connection, workspace_id)
         active = connection.execute(
-            "SELECT * FROM scans WHERE workspace_id = ? AND status = 'running'",
+            """
+            SELECT *
+            FROM scans
+            WHERE workspace_id = ? AND status = 'running' AND canceled_at IS NULL
+            """,
             (workspace["id"],),
         ).fetchone()
         if active is not None:
-            connection.commit()
+            if manages_transaction:
+                connection.commit()
             return workspace_state(connection, workspace["id"])
         if workspace["updated_at"] != workspace_version:
             raise SystemExit("Codex Security setup changed while the scan was starting. Try again.")
@@ -1429,16 +1457,17 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
         connection.execute(
             """
             INSERT INTO scans (
-                id, workspace_id, target_path, target_revision, target_snapshot_digest,
+                id, workspace_id, target_id, target_path, target_revision, target_snapshot_digest,
                 target_device, target_inode,
                 scope, mode, user_context, deep_scan_owner_thread_id,
                 diff_target_kind, diff_base_revision, diff_head_revision, diff_content_digest,
-                scan_dir, status, phase, started_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', 'preflight', ?, ?, ?)
+                target_summary, scan_dir, status, phase, started_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', 'preflight', ?, ?, ?)
             """,
             (
                 scan_id,
                 workspace["id"],
+                workspace["target_id"],
                 str(target),
                 revision,
                 target_snapshot_digest,
@@ -1452,6 +1481,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
                 diff_target["baseRevision"] if diff_target else None,
                 diff_target["headRevision"] if diff_target else None,
                 diff_target.get("contentDigest") if diff_target else None,
+                target_summary,
                 str(scan_dir),
                 timestamp,
                 timestamp,
@@ -1461,19 +1491,25 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
         connection.execute(
             """
             INSERT INTO scan_progress (
-                scan_id, review_items_total, review_items_completed,
+                scan_id, scope_file_count, review_items_total, review_items_completed,
                 reportable_findings_count, updated_at
-            ) VALUES (?, 0, 0, 0, ?)
+            ) VALUES (?, ?, 0, 0, 0, ?)
             """,
-            (scan_id, timestamp),
+            (
+                scan_id,
+                scope_file_count,
+                timestamp,
+            ),
         )
         connection.execute(
             "UPDATE workspaces SET active_scan_id = ?, updated_at = ? WHERE id = ?",
             (scan_id, timestamp, workspace["id"]),
         )
-        connection.commit()
+        if manages_transaction:
+            connection.commit()
     except BaseException:
-        connection.rollback()
+        if manages_transaction:
+            connection.rollback()
         raise
     return workspace_state(connection, workspace["id"])
 
@@ -1562,10 +1598,12 @@ def pin_legacy_manifest_digest(
 def complete_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
     with scan_completion_lock(scan_id):
-        return complete_scan_locked(connection, scan_id)
+        return complete_scan_locked(connection, scan_id, args.claim_token)
 
 
-def complete_scan_locked(connection: sqlite3.Connection, scan_id: str) -> dict[str, Any]:
+def complete_scan_locked(
+    connection: sqlite3.Connection, scan_id: str, claim_token: str | None
+) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
     if scan["status"] == "complete":
         scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
@@ -1584,6 +1622,11 @@ def complete_scan_locked(connection: sqlite3.Connection, scan_id: str) -> dict[s
         return scan_context(connection, scan["id"])
     if scan["status"] != "running":
         raise SystemExit("Only a running scan can be completed.")
+    require_current_continuation(
+        scan,
+        claim_token,
+        error_message="Scan completion is owned by another continuation.",
+    )
     deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
     require_unchanged_target(scan)
     scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
@@ -1614,6 +1657,11 @@ def complete_scan_locked(connection: sqlite3.Connection, scan_id: str) -> dict[s
         if scan["status"] != "running":
             raise SystemExit("Only a running scan can be completed.")
         deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
+        require_current_continuation(
+            scan,
+            claim_token,
+            error_message="Scan completion is owned by another continuation.",
+        )
         connection.execute("DELETE FROM scan_artifacts WHERE scan_id = ?", (scan["id"],))
         for kind, path in artifacts.items():
             if path is not None:
@@ -1661,6 +1709,11 @@ def fail_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[
             return scan_context(connection, scan["id"])
         if scan["status"] == "complete":
             raise SystemExit("A completed scan cannot be marked failed.")
+        require_current_continuation(
+            scan,
+            args.claim_token,
+            error_message="Scan failure is owned by another continuation.",
+        )
         updated = connection.execute(
             """
             UPDATE scans
@@ -1693,14 +1746,13 @@ def fail_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[
 def cancel_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
     thread_id = optional_text(args.thread_id, maximum=512)
-    if thread_id is None:
-        raise SystemExit("thread-id is required.")
     connection.execute("BEGIN IMMEDIATE")
     try:
         timestamp = now()
         scan = require_scan(connection, scan_id)
         workspace = require_workspace(connection, scan["workspace_id"])
-        if workspace["thread_id"] != thread_id:
+        owning_thread_id = scan["continuation_thread_id"] or workspace["thread_id"]
+        if thread_id is not None and owning_thread_id != thread_id:
             raise SystemExit("A scan can only be canceled from its owning Codex thread.")
         if scan["canceled_at"] is not None:
             connection.commit()
@@ -1744,7 +1796,16 @@ def claim_handoff_delivery(
         updated = connection.execute(
             """
             UPDATE scans
-            SET handoff_claimed_at = ?, handoff_claim_token = ?, updated_at = ?
+            SET handoff_claimed_at = ?, handoff_claim_token = ?,
+                continuation_thread_id = CASE
+                    WHEN handoff_claim_token IS NULL THEN continuation_thread_id
+                    ELSE NULL
+                END,
+                deep_scan_owner_thread_id = CASE
+                    WHEN handoff_claim_token IS NULL THEN deep_scan_owner_thread_id
+                    ELSE NULL
+                END,
+                updated_at = ?
             WHERE id = ? AND handoff_status = 'pending'
                 AND (
                     handoff_claim_token IS NULL
@@ -1779,12 +1840,57 @@ def release_handoff_delivery(
         connection.execute(
             """
             UPDATE scans
-            SET handoff_claimed_at = NULL, handoff_claim_token = NULL, updated_at = ?
+            SET handoff_claimed_at = NULL, handoff_claim_token = NULL,
+                continuation_thread_id = NULL, deep_scan_owner_thread_id = NULL,
+                updated_at = ?
             WHERE id = ? AND handoff_status = 'pending'
                 AND handoff_claim_token = ?
             """,
             (timestamp, scan["id"], claim_token),
         )
+    return workspace_state(connection, scan["workspace_id"])
+
+
+def attach_scan_continuation_thread(
+    connection: sqlite3.Connection, args: argparse.Namespace
+) -> dict[str, Any]:
+    scan_id = require_uuid(args.scan_id, "scan-id")
+    claim_token = require_handoff_claim_token(args.claim_token)
+    thread_id = optional_text(args.thread_id, maximum=512)
+    if thread_id is None:
+        raise SystemExit("Codex Security continuation thread ID is required.")
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        timestamp = now()
+        scan = require_scan(connection, scan_id)
+        if scan["handoff_claim_token"] != claim_token:
+            raise SystemExit("Codex Security continuation thread claim token does not match.")
+        if scan["continuation_thread_id"] is not None:
+            if scan["continuation_thread_id"] != thread_id:
+                raise SystemExit(
+                    "Codex Security scan continuation is owned by another continuation."
+                )
+            connection.commit()
+            return workspace_state(connection, scan["workspace_id"])
+        updated = connection.execute(
+            """
+            UPDATE scans
+            SET continuation_thread_id = ?,
+                deep_scan_owner_thread_id = CASE
+                    WHEN mode = 'deep' THEN ? ELSE deep_scan_owner_thread_id
+                END,
+                updated_at = ?
+            WHERE id = ? AND continuation_thread_id IS NULL
+                AND handoff_claim_token = ?
+            """,
+            (thread_id, thread_id, timestamp, scan["id"], claim_token),
+        )
+        if updated.rowcount != 1:
+            raise SystemExit("Codex Security continuation thread could not be attached.")
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
     return workspace_state(connection, scan["workspace_id"])
 
 
@@ -1800,7 +1906,11 @@ def mark_handoff_delivered(
         scan = require_scan(connection, scan_id)
         if thread_id is not None:
             workspace = require_workspace(connection, scan["workspace_id"])
-            validate_handoff_delivery_thread(workspace["thread_id"], thread_id, claim_token)
+            validate_handoff_delivery_thread(
+                scan["continuation_thread_id"] or workspace["thread_id"],
+                thread_id,
+                claim_token,
+            )
         if scan["handoff_status"] == "delivered":
             if scan["handoff_claim_token"] != claim_token:
                 raise SystemExit(
@@ -1873,6 +1983,23 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
                     remediation,
                     require_applied_content=True,
                 )
+        previous_triage = connection.execute(
+            "SELECT status, close_reason, note FROM finding_triage WHERE occurrence_id = ?",
+            (occurrence["id"],),
+        ).fetchone()
+        if previous_triage is None or (
+            previous_triage["status"],
+            previous_triage["close_reason"],
+            previous_triage["note"],
+        ) != (args.status, close_reason, note):
+            connection.execute(
+                """
+                INSERT INTO finding_decisions (
+                    id, occurrence_id, status, close_reason, note, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (str(uuid.uuid4()), occurrence["id"], args.status, close_reason, note, timestamp),
+            )
         connection.execute(
             """
             INSERT INTO finding_triage (occurrence_id, status, close_reason, note, updated_at)
@@ -2782,7 +2909,11 @@ def diff_target_summary(diff_target: dict[str, str]) -> str:
 
 
 def workspace_state(
-    connection: sqlite3.Connection, workspace_id: str, *, thread_id: str | None = None
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    *,
+    result_scan_id: str | None = None,
+    thread_id: str | None = None,
 ) -> dict[str, Any]:
     workspace = require_workspace(connection, workspace_id)
     if thread_id is not None and workspace["thread_id"] != optional_text(thread_id, maximum=512):
@@ -2805,10 +2936,9 @@ def workspace_state(
     }
     if workspace["capability_preflight_json"]:
         result["capabilityPreflight"] = json.loads(workspace["capability_preflight_json"])
-    if workspace["active_scan_id"]:
-        result["results"] = scan_result(
-            connection, require_scan(connection, workspace["active_scan_id"])
-        )
+    selected_scan_id = result_scan_id or workspace["active_scan_id"]
+    if selected_scan_id:
+        result["results"] = scan_result(connection, require_scan(connection, selected_scan_id))
         return result
 
     target_metadata = None
@@ -2876,7 +3006,7 @@ def scan_context(
     return {
         "otherRunningDeepScans": deep_scan.other_running_deep_scans(connection, scan["id"]),
         "scan": scan_result(connection, scan, occurrence_id=occurrence_id),
-        "workspace": workspace_state(connection, scan["workspace_id"]),
+        "workspace": workspace_state(connection, scan["workspace_id"], result_scan_id=scan["id"]),
     }
 
 
@@ -2959,6 +3089,7 @@ def scan_result(
         "candidates": {"reportable": progress["reportable_findings_count"]},
         "coverage": {
             "closedRows": progress["review_items_completed"],
+            "filesTotal": progress["scope_file_count"],
             "worklistRows": progress["review_items_total"],
         },
         "phase": scan["phase"],
@@ -2975,6 +3106,7 @@ def scan_result(
         "artifacts": artifacts,
         "canceledAt": scan["canceled_at"],
         "contract": scan_contract(scan),
+        "continuationThreadId": scan["continuation_thread_id"],
         "failureMessage": scan["failure_message"],
         "findings": [finding_result(connection, scan, row) for row in occurrence_rows],
         "findingCount": finding_count,
@@ -2994,6 +3126,7 @@ def scan_result(
         "scope": scan["scope"],
         "targetPath": scan["target_path"],
         "targetRevision": scan["target_revision"],
+        "targetSummary": scan["target_summary"],
         "updatedAt": max(
             scan["updated_at"],
             progress["updated_at"],
@@ -3512,6 +3645,7 @@ def main() -> None:
             require_remediation_target=require_remediation_target,
             require_scannable_target=require_scannable_target,
             require_scope=require_scope,
+            ensure_security_target=ensure_security_target,
             require_canonical_scan_directory=require_canonical_scan_directory,
             safe_segment=safe_segment,
             compact_timestamp=compact_timestamp,
@@ -3584,6 +3718,8 @@ def main() -> None:
             result = claim_handoff_delivery(connection, args)
         elif args.command == "release-handoff-delivery":
             result = release_handoff_delivery(connection, args)
+        elif args.command == "attach-scan-continuation-thread":
+            result = attach_scan_continuation_thread(connection, args)
         elif args.command == "set-finding-triage":
             result = set_finding_triage(connection, args)
         elif args.command == "request-finding-remediation":

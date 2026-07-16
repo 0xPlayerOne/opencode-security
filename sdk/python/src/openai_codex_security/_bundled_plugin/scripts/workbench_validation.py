@@ -44,6 +44,24 @@ def require_handoff_claim_token(value: str) -> str:
     return f"{RECOVERY_HANDOFF_TOKEN_PREFIX}{normalized}" if recovery_token else normalized
 
 
+def require_current_continuation(
+    scan: sqlite3.Row,
+    claim_token: str | None,
+    *,
+    error_message: str,
+) -> None:
+    if (
+        scan["handoff_status"] == "delivered"
+        and scan["handoff_claim_token"] is None
+        and claim_token is None
+    ):
+        return
+    if claim_token is None:
+        raise SystemExit(error_message)
+    if scan["handoff_claim_token"] != require_handoff_claim_token(claim_token):
+        raise SystemExit(error_message)
+
+
 def validate_handoff_delivery_thread(
     owning_thread_id: str | None,
     requesting_thread_id: str,
