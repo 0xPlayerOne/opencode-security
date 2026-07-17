@@ -81,7 +81,7 @@ from workbench_scan_start import (
     scan_diff_identity,
     scan_target_identity,
 )
-from workbench_schema import MIGRATIONS
+from workbench_schema import MIGRATIONS, normalize_pre_release_migrations, sql_statements
 from workbench_source_excerpt import finding_source_excerpt
 from workbench_target import (
     clean_worktree_content_digest,
@@ -286,7 +286,7 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
             )
             """
         )
-        normalize_pre_release_migrations(connection)
+        normalize_pre_release_migrations(connection, now())
         applied = {
             row["version"] for row in connection.execute("SELECT version FROM schema_migrations")
         }
@@ -305,69 +305,6 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
     except BaseException:
         connection.rollback()
         raise
-
-
-def normalize_pre_release_migrations(connection: sqlite3.Connection) -> None:
-    migration = connection.execute(
-        "SELECT name FROM schema_migrations WHERE version = 2"
-    ).fetchone()
-    if migration is None or migration["name"] != "finding management schema":
-        return
-
-    legacy_versions = {
-        row["version"]: row["name"]
-        for row in connection.execute(
-            "SELECT version, name FROM schema_migrations WHERE version BETWEEN 2 AND 5"
-        )
-    }
-    expected = {
-        2: "finding management schema",
-        3: "scan handoff delivery claims",
-        4: "finding remediation action claims",
-        5: "scan target snapshot digests",
-    }
-    for version, name in legacy_versions.items():
-        if expected.get(version) != name:
-            raise SystemExit(
-                "The Codex Security database has an unsupported pre-release migration history."
-            )
-
-    connection.execute(
-        "DELETE FROM schema_migrations WHERE version = 5 AND name = ?",
-        (expected[5],),
-    )
-    for old_version, new_version in ((4, 5), (3, 4), (2, 3)):
-        connection.execute(
-            "UPDATE schema_migrations SET version = ? WHERE version = ? AND name = ?",
-            (new_version, old_version, expected[old_version]),
-        )
-    add_column_if_missing(connection, "workspaces", "capability_preflight_json", "TEXT")
-    add_column_if_missing(connection, "scans", "target_snapshot_digest", "TEXT")
-    connection.execute(
-        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-        (2, "persist capability preflight summaries", now()),
-    )
-
-
-def add_column_if_missing(
-    connection: sqlite3.Connection, table: str, column: str, definition: str
-) -> None:
-    columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
-    if column not in columns:
-        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-
-
-def sql_statements(script: str) -> list[str]:
-    statements: list[str] = []
-    buffer = ""
-    for line in script.splitlines():
-        buffer = f"{buffer}\n{line}".strip()
-        if sqlite3.complete_statement(buffer):
-            statements.append(buffer)
-            buffer = ""
-    if buffer:
-        raise ValueError("Incomplete SQLite migration statement.")
-    return statements
 
 
 def reject_nonstandard_json_number(value: str) -> None:
@@ -1802,10 +1739,12 @@ def complete_scan_locked(
         connection.execute(
             """
             UPDATE scan_progress
-            SET reportable_findings_count = ?, updated_at = ?
+            SET reportable_findings_count = ?, phase_items_total = ?,
+                phase_items_completed = ?, phase_progress_unit = 'report_artifacts',
+                updated_at = ?
             WHERE scan_id = ?
             """,
-            (finding_count, timestamp, scan["id"]),
+            (finding_count, len(artifacts), len(artifacts), timestamp, scan["id"]),
         )
         updated = connection.execute(
             """
@@ -3066,6 +3005,11 @@ def scan_result(
             "worklistRows": progress["review_items_total"],
         },
         "phase": scan["phase"],
+        "phaseProgress": {
+            "completed": progress["phase_items_completed"],
+            "total": progress["phase_items_total"],
+            "unit": progress["phase_progress_unit"],
+        },
         "reviewPass": progress["deep_review_pass"],
         "status": "canceled" if scan["canceled_at"] else scan["status"],
         "updatedAt": progress["updated_at"],

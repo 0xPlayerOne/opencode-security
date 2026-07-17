@@ -47,6 +47,38 @@ def update_progress(
         ).fetchone()
         if args.phase is not None and PHASES.index(args.phase) < PHASES.index(scan["phase"]):
             raise SystemExit("Scan progress cannot move to an earlier phase.")
+        next_phase = args.phase or scan["phase"]
+        phase_changed = next_phase != scan["phase"]
+        phase_total = 0 if phase_changed else progress["phase_items_total"]
+        phase_completed = 0 if phase_changed else progress["phase_items_completed"]
+        phase_unit = None if phase_changed else progress["phase_progress_unit"]
+        if args.phase_items_total is not None:
+            phase_total = args.phase_items_total
+        if args.phase_items_completed is not None:
+            phase_completed = args.phase_items_completed
+        if args.phase_progress_unit is not None:
+            phase_unit = args.phase_progress_unit
+        if phase_completed > phase_total:
+            raise SystemExit("Completed phase items cannot exceed total phase items.")
+        if phase_total > 0 and phase_unit is None:
+            raise SystemExit("Phase progress with a nonzero total requires a progress unit.")
+        if not phase_changed:
+            if (
+                args.phase_items_total is not None
+                and args.phase_items_total < progress["phase_items_total"]
+            ):
+                raise SystemExit("Phase item total cannot decrease within a phase.")
+            if (
+                args.phase_items_completed is not None
+                and args.phase_items_completed < progress["phase_items_completed"]
+            ):
+                raise SystemExit("Completed phase items cannot decrease within a phase.")
+            if (
+                args.phase_progress_unit is not None
+                and progress["phase_progress_unit"] is not None
+                and args.phase_progress_unit != progress["phase_progress_unit"]
+            ):
+                raise SystemExit("Phase progress unit cannot change within a phase.")
         updates: list[str] = []
         values: list[Any] = []
         for column, value in (
@@ -107,6 +139,15 @@ def update_progress(
                 "UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?",
                 (timestamp, scan["id"]),
             )
+        connection.execute(
+            """
+            UPDATE scan_progress
+            SET phase_items_total = ?, phase_items_completed = ?,
+                phase_progress_unit = ?, updated_at = ?
+            WHERE scan_id = ?
+            """,
+            (phase_total, phase_completed, phase_unit, timestamp, scan["id"]),
+        )
         connection.commit()
     except BaseException:
         connection.rollback()

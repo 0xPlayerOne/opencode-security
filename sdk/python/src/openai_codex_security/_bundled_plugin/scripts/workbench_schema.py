@@ -1,6 +1,7 @@
 """SQLite schema history for the Codex Security workbench."""
 
 import argparse
+import sqlite3
 
 MIGRATIONS = (
     (
@@ -505,7 +506,114 @@ MIGRATIONS = (
         );
         """,
     ),
+    (
+        20,
+        "phase-specific scan progress",
+        """
+        ALTER TABLE scan_progress
+        ADD COLUMN phase_items_total INTEGER NOT NULL DEFAULT 0
+            CHECK (phase_items_total >= 0);
+
+        ALTER TABLE scan_progress
+        ADD COLUMN phase_items_completed INTEGER NOT NULL DEFAULT 0
+            CHECK (phase_items_completed >= 0 AND phase_items_completed <= phase_items_total);
+
+        ALTER TABLE scan_progress
+        ADD COLUMN phase_progress_unit TEXT CHECK (
+            phase_progress_unit IS NULL OR phase_progress_unit IN (
+                'checks',
+                'threat_surfaces',
+                'review_receipts',
+                'candidate_findings',
+                'validated_findings',
+                'report_artifacts'
+            )
+        );
+        """,
+    ),
 )
+
+
+def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: str) -> None:
+    phase_progress_migration = connection.execute(
+        "SELECT name FROM schema_migrations WHERE version = 12"
+    ).fetchone()
+    if (
+        phase_progress_migration is not None
+        and phase_progress_migration["name"] == "phase-specific scan progress"
+    ):
+        target_migration = connection.execute(
+            "SELECT name FROM schema_migrations WHERE version = 20"
+        ).fetchone()
+        if target_migration is not None:
+            raise SystemExit(
+                "The Codex Security database has an unsupported pre-release migration history."
+            )
+        connection.execute(
+            "UPDATE schema_migrations SET version = 20 WHERE version = 12 AND name = ?",
+            ("phase-specific scan progress",),
+        )
+
+    migration = connection.execute(
+        "SELECT name FROM schema_migrations WHERE version = 2"
+    ).fetchone()
+    if migration is None or migration["name"] != "finding management schema":
+        return
+
+    legacy_versions = {
+        row["version"]: row["name"]
+        for row in connection.execute(
+            "SELECT version, name FROM schema_migrations WHERE version BETWEEN 2 AND 5"
+        )
+    }
+    expected = {
+        2: "finding management schema",
+        3: "scan handoff delivery claims",
+        4: "finding remediation action claims",
+        5: "scan target snapshot digests",
+    }
+    for version, name in legacy_versions.items():
+        if expected.get(version) != name:
+            raise SystemExit(
+                "The Codex Security database has an unsupported pre-release migration history."
+            )
+
+    connection.execute(
+        "DELETE FROM schema_migrations WHERE version = 5 AND name = ?",
+        (expected[5],),
+    )
+    for old_version, new_version in ((4, 5), (3, 4), (2, 3)):
+        connection.execute(
+            "UPDATE schema_migrations SET version = ? WHERE version = ? AND name = ?",
+            (new_version, old_version, expected[old_version]),
+        )
+    add_column_if_missing(connection, "workspaces", "capability_preflight_json", "TEXT")
+    add_column_if_missing(connection, "scans", "target_snapshot_digest", "TEXT")
+    connection.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
+        (2, "persist capability preflight summaries", timestamp),
+    )
+
+
+def add_column_if_missing(
+    connection: sqlite3.Connection, table: str, column: str, definition: str
+) -> None:
+    columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def sql_statements(script: str) -> list[str]:
+    statements: list[str] = []
+    buffer = ""
+    for line in script.splitlines():
+        buffer = f"{buffer}\n{line}".strip()
+        if sqlite3.complete_statement(buffer):
+            statements.append(buffer)
+            buffer = ""
+    if buffer:
+        raise ValueError("Incomplete SQLite migration statement.")
+    return statements
 
 
 def main() -> None:

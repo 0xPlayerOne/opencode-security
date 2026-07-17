@@ -17,6 +17,7 @@ from workbench_constants import (
     FINDING_STATUSES,
     FINDINGS_PAGE_MAX,
     MODES,
+    PHASE_PROGRESS_UNITS,
     PHASES,
     REMEDIATION_UPDATE_STATES,
 )
@@ -142,6 +143,9 @@ def parse_args(description: str) -> argparse.Namespace:
     update_progress = subparsers.add_parser("update-progress")
     update_progress.add_argument("--scan-id", required=True)
     update_progress.add_argument("--phase", choices=PHASES)
+    update_progress.add_argument("--phase-items-total", type=non_negative_int)
+    update_progress.add_argument("--phase-items-completed", type=non_negative_int)
+    update_progress.add_argument("--phase-progress-unit", choices=PHASE_PROGRESS_UNITS)
     update_progress.add_argument("--review-items-total", type=non_negative_int)
     update_progress.add_argument("--review-items-completed", type=non_negative_int)
     update_progress.add_argument("--reportable-findings-count", type=non_negative_int)

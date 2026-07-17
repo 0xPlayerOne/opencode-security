@@ -5,6 +5,14 @@ import argparse
 MODES = ("diff", "standard", "deep")
 DIFF_TARGET_KINDS = ("working_tree", "commit", "range")
 PHASES = ("preflight", "threat_model", "discovery", "validation", "attack_path", "reporting")
+PHASE_PROGRESS_UNITS = (
+    "checks",
+    "threat_surfaces",
+    "review_receipts",
+    "candidate_findings",
+    "validated_findings",
+    "report_artifacts",
+)
 FINDING_STATUSES = ("open", "closed")
 FINDING_CLOSE_REASONS = ("already_fixed", "wont_fix", "false_positive")
 REMEDIATION_STATES = (
