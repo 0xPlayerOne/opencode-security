@@ -531,6 +531,26 @@ MIGRATIONS = (
         );
         """,
     ),
+    (
+        21,
+        "current scan preflight state",
+        """
+        ALTER TABLE scan_progress
+        ADD COLUMN preflight_issues_json TEXT NOT NULL DEFAULT '[]';
+
+        ALTER TABLE scan_progress
+        ADD COLUMN preflight_checks_total INTEGER NOT NULL DEFAULT 0
+            CHECK (preflight_checks_total >= 0);
+
+        ALTER TABLE scan_progress
+        ADD COLUMN preflight_checks_completed INTEGER NOT NULL DEFAULT 0
+            CHECK (
+                preflight_checks_completed >= 0
+                AND preflight_checks_completed <= preflight_checks_total
+            );
+
+        """,
+    ),
 )
 
 
@@ -552,6 +572,25 @@ def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: 
         connection.execute(
             "UPDATE schema_migrations SET version = 20 WHERE version = 12 AND name = ?",
             ("phase-specific scan progress",),
+        )
+
+    preflight_progress_migration = connection.execute(
+        "SELECT name FROM schema_migrations WHERE version = 13"
+    ).fetchone()
+    if (
+        preflight_progress_migration is not None
+        and preflight_progress_migration["name"] == "current scan preflight state"
+    ):
+        target_migration = connection.execute(
+            "SELECT name FROM schema_migrations WHERE version = 21"
+        ).fetchone()
+        if target_migration is not None:
+            raise SystemExit(
+                "The Codex Security database has an unsupported pre-release migration history."
+            )
+        connection.execute(
+            "UPDATE schema_migrations SET version = 21 WHERE version = 13 AND name = ?",
+            ("current scan preflight state",),
         )
 
     migration = connection.execute(

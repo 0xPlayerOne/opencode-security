@@ -3010,6 +3010,11 @@ def scan_result(
             "total": progress["phase_items_total"],
             "unit": progress["phase_progress_unit"],
         },
+        "preflightProgress": {
+            "completed": progress["preflight_checks_completed"],
+            "total": progress["preflight_checks_total"],
+        },
+        "preflightIssues": json.loads(progress["preflight_issues_json"]),
         "reviewPass": progress["deep_review_pass"],
         "status": "canceled" if scan["canceled_at"] else scan["status"],
         "updatedAt": progress["updated_at"],

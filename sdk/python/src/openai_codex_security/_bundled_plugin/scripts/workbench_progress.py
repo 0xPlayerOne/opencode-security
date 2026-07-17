@@ -1,6 +1,7 @@
 """Progress transition helpers for the Codex Security workbench."""
 
 import argparse
+import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -10,6 +11,62 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workbench.handoff import require_current_continuation
 from workbench_constants import PHASES
 from workbench_validation import require_uuid
+
+MAX_PREFLIGHT_ISSUES_JSON_BYTES = 64 * 1024
+MAX_PREFLIGHT_ISSUES = 32
+
+
+def _javascript_string_length(value: str) -> int:
+    return len(value.encode("utf-16-le", errors="surrogatepass")) // 2
+
+
+def _preflight_issue_text(value: Any, maximum: int, label: str) -> str:
+    if not isinstance(value, str):
+        raise SystemExit(f"Preflight issue {label} must be text.")
+    normalized = value.strip()
+    if not normalized or _javascript_string_length(normalized) > maximum:
+        raise SystemExit(f"Preflight issue {label} must contain 1 to {maximum} characters.")
+    return normalized
+
+
+def preflight_issues_json(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if len(value.encode("utf-8")) > MAX_PREFLIGHT_ISSUES_JSON_BYTES:
+        raise SystemExit(
+            f"Preflight issues must be no larger than {MAX_PREFLIGHT_ISSUES_JSON_BYTES} bytes."
+        )
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise SystemExit("Preflight issues must be valid JSON.") from exc
+    if not isinstance(payload, list) or len(payload) > MAX_PREFLIGHT_ISSUES:
+        raise SystemExit(
+            f"Preflight issues must be an array of at most {MAX_PREFLIGHT_ISSUES} objects."
+        )
+    normalized: list[dict[str, str]] = []
+    expected_keys = {"capability", "reason", "severity", "status"}
+    for index, issue in enumerate(payload):
+        label = f"{index + 1}"
+        if not isinstance(issue, dict) or set(issue) != expected_keys:
+            raise SystemExit(
+                f"Preflight issue {label} must contain capability, reason, severity, and status."
+            )
+        severity = issue.get("severity")
+        status = issue.get("status")
+        if severity not in {"block", "warn"} or status not in {"fail", "unknown"}:
+            raise SystemExit(f"Preflight issue {label} has an invalid severity or status.")
+        normalized.append(
+            {
+                "capability": _preflight_issue_text(
+                    issue.get("capability"), 128, f"{label} capability"
+                ),
+                "reason": _preflight_issue_text(issue.get("reason"), 1200, f"{label} reason"),
+                "severity": severity,
+                "status": status,
+            }
+        )
+    return json.dumps(normalized, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
 
 
 def reportable_count(
@@ -29,6 +86,7 @@ def update_progress(
     scan_context: Callable[[sqlite3.Connection, str], dict[str, Any]],
 ) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
+    serialized_preflight_issues = preflight_issues_json(args.preflight_issues_json)
     connection.execute("BEGIN IMMEDIATE")
     try:
         timestamp = now()
@@ -42,6 +100,11 @@ def update_progress(
         )
         if args.deep_review_pass is not None and scan["mode"] != "deep":
             raise SystemExit("Only Deep Scan can record a deep review pass.")
+        if serialized_preflight_issues is not None:
+            if scan["mode"] == "deep":
+                raise SystemExit("Deep Scan preflight progress is owned by its coordinator.")
+            if scan["phase"] != "preflight" or args.phase not in {None, "preflight"}:
+                raise SystemExit("Preflight issues can only be updated during preflight.")
         progress = connection.execute(
             "SELECT * FROM scan_progress WHERE scan_id = ?", (scan["id"],)
         ).fetchone()
@@ -81,7 +144,11 @@ def update_progress(
                 raise SystemExit("Phase progress unit cannot change within a phase.")
         updates: list[str] = []
         values: list[Any] = []
+        if next_phase == "preflight" and scan["mode"] != "deep":
+            updates.extend(["preflight_checks_total = ?", "preflight_checks_completed = ?"])
+            values.extend([phase_total, phase_completed])
         for column, value in (
+            ("preflight_issues_json", serialized_preflight_issues),
             ("review_items_total", args.review_items_total),
             ("review_items_completed", args.review_items_completed),
             (
