@@ -1,1 +1,7 @@
-sdk/python/src/openai_codex_security/_bundled_plugin/examples/completed-scan/*.json text eol=lf
+*.cjs text eol=lf
+*.js text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.mjs text eol=lf
+*.ts text eol=lf
+sdk/typescript/compatibility/golden/*.txt text eol=lf
