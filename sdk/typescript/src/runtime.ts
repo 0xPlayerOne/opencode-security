@@ -39,6 +39,7 @@ const MAX_ZIP_ENTRIES = 4_096;
 const MAX_ZIP_CENTRAL_DIRECTORY = 16 * 1024 * 1024;
 const MAX_ZIP_ENTRY_SIZE = 128 * 1024 * 1024;
 const MAX_ZIP_EXPANDED_SIZE = 512 * 1024 * 1024;
+const MODEL_UNSAFE_PATH = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u;
 const CRC32_TABLE = Uint32Array.from({ length: 256 }, (_, index) => {
   let value = index;
   for (let bit = 0; bit < 8; bit += 1) {
@@ -102,6 +103,7 @@ export async function validateOutputDir(
   if (outputDirectory === undefined) {
     return null;
   }
+  requireModelSafeOutputDir(outputDirectory);
   const path = resolve(expandHome(outputDirectory));
   try {
     const metadata = await lstat(path).catch((error: unknown) => {
@@ -119,14 +121,21 @@ export async function validateOutputDir(
           `Scan output directory must be empty: ${path}`,
         );
       }
-      return await realpath(path);
+      const canonical = await realpath(path);
+      requireModelSafeOutputDir(canonical);
+      return canonical;
     }
 
     let parent = dirname(path);
     while (true) {
       try {
         if ((await stat(parent)).isDirectory()) {
-          return resolve(await realpath(parent), relative(parent, path));
+          const canonical = resolve(
+            await realpath(parent),
+            relative(parent, path),
+          );
+          requireModelSafeOutputDir(canonical);
+          return canonical;
         }
         break;
       } catch (error) {
@@ -148,12 +157,24 @@ export async function validateOutputDir(
   }
 }
 
+export function requireModelSafeOutputDir(path: string): void {
+  if (MODEL_UNSAFE_PATH.test(path)) {
+    throw new OutputDirectoryError(
+      "Scan output directory must not contain control or line-separator characters.",
+    );
+  }
+}
+
 export async function prepareOutputDir(
   outputDirectory: string | undefined,
   repositoryName: string,
   temporaryRoot: string = tmpdir(),
   validateLocation?: (path: string) => void,
 ): Promise<string> {
+  if (outputDirectory === undefined) {
+    requireModelSafeOutputDir(temporaryRoot);
+    requireModelSafeOutputDir(await realpath(temporaryRoot));
+  }
   const path = await validateOutputDir(outputDirectory);
   validateLocation?.(path ?? (await realpath(temporaryRoot)));
   if (path === null) {
@@ -207,6 +228,7 @@ export async function validatePreparedOutputDir(
 ): Promise<string> {
   const before = await lstat(path);
   const canonical = await realpath(path);
+  requireModelSafeOutputDir(canonical);
   validateLocation?.(canonical);
   const entries = await readdir(canonical);
   const current = await lstat(path);

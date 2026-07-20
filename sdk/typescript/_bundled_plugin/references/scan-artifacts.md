@@ -11,6 +11,7 @@ Use these shared path conventions for Codex Security scan workflows unless the u
 - `security_scans_dir=<system_temp_dir>/codex-security-scans/<repo_name>`
 - `scan_id=<commit>_<scan timestamp>`
 - `scan_dir=<security_scans_dir>/<scan_id>`
+- `target_paths_file=$CODEX_SECURITY_TARGET_PATHS_FILE` for SDK scoped-path scans; this read-only scope input lives in the isolated Codex home outside the model-writable scan directory. Pass it directly to `make-repo-rank-input --scopes-file` and `bind-repo-scopes --scopes-file` before finalization, and do not print, evaluate, modify, or treat its contents as shell syntax.
 - `artifacts_dir=<scan_dir>/artifacts`
 - `context_dir=<artifacts_dir>/01_context`
 - `discovery_dir=<artifacts_dir>/02_discovery`

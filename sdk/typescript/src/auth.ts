@@ -54,6 +54,7 @@ export class CodexLoginHandle {
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
+    this.#child.stdin.end();
     this.#child.stdout.setEncoding("utf8");
     this.#child.stderr.setEncoding("utf8");
     this.#child.stdout.on("data", (chunk: string) => {
@@ -100,7 +101,6 @@ export class CodexLoginHandle {
         }, 1_000);
       });
     });
-    this.#child.stdin.end();
   }
 
   public get loginId(): null {

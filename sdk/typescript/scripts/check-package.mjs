@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
 
@@ -9,7 +10,13 @@ if (archive === undefined || args.length !== 1) {
   throw new Error("Usage: node scripts/check-package.mjs <npm-tarball>");
 }
 
-const archiveBytes = gunzipSync(readFileSync(archive));
+const MAX_EXPANDED_ASSET_BYTES = 32 * 1024 * 1024;
+const MAX_ENCODED_CANDIDATES = 16_384;
+const archiveBytes = gunzipSync(readFileSync(archive), {
+  maxOutputLength: MAX_EXPANDED_ASSET_BYTES,
+});
+const PUBLIC_LOGO_SHA256 =
+  "9b9c2b09b2fa064611fb62307d321d5c2ea70cf0789f7ce34cdb0fc0d9190b3a";
 const tarOptions = { maxBuffer: archiveBytes.byteLength + 1024 };
 function tar(args, encoding = "buffer") {
   const result = spawnSync("tar", ["--ignore-zeros", ...args], {
@@ -24,6 +31,30 @@ function tar(args, encoding = "buffer") {
     );
   }
   return result.stdout;
+}
+
+for (let offset = 0; offset + 512 <= archiveBytes.byteLength; ) {
+  const header = archiveBytes.subarray(offset, offset + 512);
+  if (header.every((byte) => byte === 0)) {
+    offset += 512;
+    continue;
+  }
+  const name = header.subarray(0, 100).toString("utf8").split("\0", 1)[0];
+  const prefix = header.subarray(345, 500).toString("utf8").split("\0", 1)[0];
+  const path = prefix === "" ? name : `${prefix}/${name}`;
+  const sizeField = header
+    .subarray(124, 136)
+    .toString("ascii")
+    .split("\0", 1)[0]
+    .trim();
+  if (!/^[0-7]*$/u.test(sizeField)) {
+    throw new Error("npm tarball contains an invalid tar entry.");
+  }
+  if (path.endsWith("/") && header[156] !== 0x35) {
+    throw new Error("npm tarball contains an invalid tar entry.");
+  }
+  const size = Number.parseInt(sizeField || "0", 8);
+  offset += 512 + Math.ceil(size / 512) * 512;
 }
 
 const entries = tar(["-tzf", archive], "utf8").split(/\r?\n/u).filter(Boolean);
@@ -209,13 +240,22 @@ if (/^[^d-]/mu.test(listing)) {
     "npm tarball contains a non-regular entry (symbolic or hard link, device, or pipe).",
   );
 }
+const listingLines = listing.split(/\r?\n/u).filter(Boolean);
+if (
+  listingLines.length !== entries.length ||
+  listingLines.some(
+    (line, index) => line.startsWith("-") && entries[index].endsWith("/"),
+  )
+) {
+  throw new Error("npm tarball contains an invalid tar entry.");
+}
 
 const internalMarker =
-  /(?:internal\.api\.openai\.org|gateway\.[a-z0-9.-]*internal|\.openai\.org|openai\.firewall\.socket\.dev|socket-firewall-registry|openai\.(?:enterprise\.)?slack\.com|(?:app\.notion\.com\/p|notion\.so)\/openai|github\.com[:/]openai\/openai(?:\.git)?(?:[/?#@%\s()<>]|$)|LicenseRef-Proprietary|\/Users\/|\/home\/dev-user|(?:^|[\0\s"'`(</])go\/[a-z0-9_-]+)/iu;
+  /(?:internal\.api\.openai\.org|gateway\.[a-z0-9.-]*internal|\.openai\.org|openai\.firewall\.socket\.dev|socket\x2dfirewall\x2dregistry|openai\.(?:enterprise\.)?slack\.com|app\.slack\.com\/client|(?:app\.notion\.com\/p|notion\.so)\/openai|linear\.app\/openai|(?:github\.com[:/]|api\.github\.com\/repos\/|raw\.githubusercontent\.com\/)openai\/openai(?:\.git)?(?:[^a-z0-9_-]|$)|LicenseRef\x2dProprietary|\/Users\/|\/home\/dev-user|flow\.apps\.openai\.org|(?:^|[^a-z0-9_-])go\/[a-z0-9_-]+)/iu;
 const obsoletePythonMarker =
   /(?:sdk\/python|openai_codex_security|pip install(?: --pre)? openai-codex-security|python-(?:ci|release))/iu;
 
-const payloads = [archiveBytes.toString("utf8")];
+const payloads = textPayloads(archiveBytes);
 const compressedFiles = [...files].filter((file) => /\.br$/iu.test(file));
 const compressedParts = new Map();
 for (const file of files) {
@@ -227,23 +267,136 @@ for (const file of files) {
   compressedParts.set(name, parts);
 }
 
+function textPayloads(bytes) {
+  const textViews = (value) => [
+    value.toString("utf8"),
+    new TextDecoder("utf-16be").decode(value),
+    new TextDecoder("utf-16le").decode(value),
+    new TextDecoder("utf-16be").decode(value.subarray(1)),
+    new TextDecoder("utf-16le").decode(value.subarray(1)),
+  ];
+  const views = textViews(bytes);
+  const unescape = (value) =>
+    value
+      .replace(
+        /\\+u\{([0-9a-f]{1,6})\}|\\+u([0-9a-f]{4})|\\+x([0-9a-f]{2})/giu,
+        (_match, codePoint, unicode, hex) =>
+          String.fromCodePoint(
+            Number.parseInt(codePoint ?? unicode ?? hex, 16),
+          ),
+      )
+      .replace(/\\+([0-3][0-7]{0,2}|[4-7][0-7]?)/gu, (_match, octal) =>
+        String.fromCodePoint(Number.parseInt(octal, 8)),
+      )
+      .replace(/(?:%[0-9a-f]{2})+/giu, (encoded) =>
+        Buffer.from(encoded.replaceAll("%", ""), "hex").toString("utf8"),
+      )
+      .replace(/\\+\//gu, "/");
+  const payloads = new Set(views);
+  let pending = views;
+  let candidateCount = 0;
+  let decodedBytes = 0;
+  const seenCandidates = new Set();
+  const boundedMatches = (value, pattern) => {
+    const matches = [];
+    for (const [match] of value.matchAll(pattern)) {
+      const candidate = match.replaceAll(/\s/gu, "");
+      if (seenCandidates.has(candidate)) continue;
+      seenCandidates.add(candidate);
+      candidateCount += 1;
+      if (candidateCount > MAX_ENCODED_CANDIDATES) {
+        throw new Error("npm tarball exceeds the encoded-content budget.");
+      }
+      matches.push(match);
+    }
+    return matches;
+  };
+  const decodedViews = (bytes) => {
+    decodedBytes += bytes.byteLength;
+    if (decodedBytes > MAX_EXPANDED_ASSET_BYTES) {
+      throw new Error("npm tarball exceeds the encoded-content budget.");
+    }
+    return textViews(bytes);
+  };
+  for (let depth = 0; depth < 8 && pending.length > 0; depth += 1) {
+    const decoded = pending.flatMap((value) => {
+      const unescaped = unescape(value).replaceAll(
+        /(?:\\+r\\+n|\\+[nrt]|[\t\r\n\f\v])+/giu,
+        "\n",
+      );
+      const decodedPercent = boundedMatches(
+        value,
+        /(?:%[0-9a-f]{2})+/giu,
+      ).flatMap((encoded) =>
+        decodedViews(Buffer.from(encoded.replaceAll("%", ""), "hex")),
+      );
+      const decodedBase64 = [
+        ...boundedMatches(
+          unescaped,
+          /(?<![a-z0-9+/_-])[a-z0-9+/_-]{6,}={0,2}(?![a-z0-9+/_=-])/giu,
+        ),
+        ...boundedMatches(
+          unescaped,
+          /(?<![a-z0-9+/_-])(?:[a-z0-9+/_-]{4,}[ \t]*\r?\n[ \t]*)+[a-z0-9+/_-]{1,}={0,2}(?![a-z0-9+/_=-])/giu,
+        ),
+        ...boundedMatches(
+          unescaped,
+          /(?<![a-z0-9+/_-])[a-z0-9+/_-]{1,3}[ \t]*\r?\n[ \t]*[a-z0-9+/_-]{3,}={0,2}(?![a-z0-9+/_=-])/giu,
+        ),
+        ...boundedMatches(
+          unescaped,
+          /(?<![a-z0-9+/_-])(?:[a-z0-9+/_-]+[ \t]*\r?\n[ \t]*){2,}[a-z0-9+/_-]+={0,2}(?![a-z0-9+/_=-])/giu,
+        ),
+      ]
+        .map((encoded) => encoded.replaceAll(/\s/gu, ""))
+        .filter((encoded) => encoded.length % 4 !== 1)
+        .flatMap((encoded) => decodedViews(Buffer.from(encoded, "base64")));
+      return [unescaped, ...decodedPercent, ...decodedBase64];
+    });
+    pending = decoded.filter((value) => {
+      if (payloads.has(value)) return false;
+      payloads.add(value);
+      return true;
+    });
+  }
+  if (pending.length > 0) {
+    throw new Error("npm tarball contains excessively nested encoded content.");
+  }
+  return [...payloads];
+}
+
 function brotliPayload(bytes, file) {
-  const result = brotliDecompressSync(bytes, { info: true });
+  const result = brotliDecompressSync(bytes, {
+    info: true,
+    maxOutputLength: MAX_EXPANDED_ASSET_BYTES,
+  });
   if (result.engine.bytesWritten !== bytes.length) {
     throw new Error(`npm tarball contains trailing Brotli data: ${file}.`);
   }
-  return result.buffer.toString("utf8");
+  return result.buffer;
 }
 
 for (const file of compressedFiles) {
-  payloads.push(brotliPayload(tar(["-xOf", archive, file]), file));
+  payloads.push(
+    ...textPayloads(brotliPayload(tar(["-xOf", archive, file]), file)),
+  );
 }
 for (const parts of compressedParts.values()) {
   parts.sort((left, right) => left.part - right.part);
   const bytes = Buffer.concat(
     parts.map(({ file }) => tar(["-xOf", archive, file])),
   );
-  payloads.push(brotliPayload(bytes, parts[0].file));
+  payloads.push(...textPayloads(brotliPayload(bytes, parts[0].file)));
+}
+for (const file of files) {
+  if (/\.png$/iu.test(file)) {
+    const digest = createHash("sha256")
+      .update(tar(["-xOf", archive, file]))
+      .digest("hex");
+    if (digest !== PUBLIC_LOGO_SHA256) {
+      throw new Error(`npm tarball contains an unexpected PNG asset: ${file}.`);
+    }
+  }
 }
 
 for (const contents of payloads) {

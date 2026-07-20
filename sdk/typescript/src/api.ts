@@ -1,6 +1,7 @@
 /// <reference lib="esnext.disposable" preserve="true" />
 
-import { lstat, mkdir, realpath } from "node:fs/promises";
+import { chmod, lstat, mkdir, realpath, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { basename, isAbsolute, join, relative, sep } from "node:path";
 import { Codex, type CodexOptions } from "@openai/codex-sdk";
@@ -38,6 +39,7 @@ import {
   importAmbientAuth,
   pluginExecutionEnvironment,
   prepareOutputDir,
+  requireModelSafeOutputDir,
   resolveCodexCommand,
   resolvePluginPath,
   resolvePluginPython,
@@ -187,6 +189,7 @@ export class CodexSecurity {
     this.#preparations.add(preparation);
     let scanDir = "";
     let handedOff = false;
+    let targetPathsFile: string | null = null;
     const target = options.target ?? "repository";
     const mode = options.mode ?? "standard";
     try {
@@ -321,17 +324,15 @@ export class CodexSecurity {
         (path) => requireOutputOutsideRepository(protectedRoot, path),
       );
       requireOutputOutsideRepository(protectedRoot, scanDir);
+      requireModelSafeOutputDir(scanDir);
       const scanDirMetadata = await lstat(scanDir);
       options.onOutputDirReady?.(scanDir);
       checkOpen();
 
       const prompt = await scanPrompt(
         runtime.plugin.installedRoot,
-        repo,
         normalized,
         mode,
-        scanDir,
-        python,
       );
       checkOpen();
       const expectation: ScanExpectation = {
@@ -363,13 +364,63 @@ export class CodexSecurity {
       await validateScanOutput();
       checkOpen();
 
-      const environment = pluginExecutionEnvironment(
-        python,
-        withoutApiKeys(runtime.environment),
-      );
+      targetPathsFile =
+        normalized.kind === "paths"
+          ? join(runtime.codexHome, `target-paths-${randomUUID()}.json`)
+          : null;
+      const runtimePaths = {
+        PYTHON: python,
+        CODEX_HOME: runtime.codexHome,
+        CODEX_SECURITY_REPOSITORY: repo,
+        CODEX_SECURITY_SCAN_DIR: scanDir,
+        CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.installedRoot,
+        ...(targetPathsFile === null
+          ? {}
+          : { CODEX_SECURITY_TARGET_PATHS_FILE: targetPathsFile }),
+      };
+      const configuredProfiles = this.config.codexOverrides?.["profiles"];
+      const profilePolicies = isCodexConfigObject(configuredProfiles)
+        ? Object.fromEntries(
+            Object.entries(configuredProfiles).map(([name, profile]) =>
+              isCodexConfigObject(profile) &&
+              isCodexConfigObject(profile["shell_environment_policy"])
+                ? [
+                    name,
+                    {
+                      ...profile,
+                      shell_environment_policy: shellEnvironmentPolicy(
+                        profile["shell_environment_policy"],
+                        runtimePaths,
+                      ),
+                    },
+                  ]
+                : [name, profile],
+            ),
+          )
+        : {};
+      const environment = {
+        ...pluginExecutionEnvironment(
+          python,
+          withoutApiKeys(runtime.environment),
+        ),
+        ...runtimePaths,
+      };
       const codex = this.#dependencies.createCodex({
         env: definedEnvironment(environment),
-        config: { sandbox_workspace_write: { writable_roots: [scanDir] } },
+        config: {
+          sandbox_workspace_write: {
+            writable_roots: [scanDir],
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+          },
+          shell_environment_policy: shellEnvironmentPolicy(
+            this.config.codexOverrides?.["shell_environment_policy"],
+            runtimePaths,
+          ),
+          ...(Object.keys(profilePolicies).length > 0
+            ? { profiles: profilePolicies }
+            : {}),
+        },
       });
       const thread = codex.startThread({
         workingDirectory: scanDir,
@@ -407,6 +458,25 @@ export class CodexSecurity {
           );
         }
       }
+      const serializedPaths =
+        normalized.kind === "paths"
+          ? JSON.stringify(normalized.paths)
+              .replaceAll("\u0085", "\\u0085")
+              .replaceAll("\u2028", "\\u2028")
+              .replaceAll("\u2029", "\\u2029")
+          : null;
+      await requireUnchangedRuntimeHome();
+      await validateScanOutput();
+      checkOpen();
+      if (serializedPaths !== null && targetPathsFile !== null) {
+        await writeFile(targetPathsFile, `${serializedPaths}\n`, {
+          flag: "wx",
+          mode: 0o400,
+          signal: controller.signal,
+        });
+        await chmod(targetPathsFile, 0o400);
+        checkOpen();
+      }
       await requireUnchangedRuntimeHome();
       await validateScanOutput();
       checkOpen();
@@ -424,9 +494,13 @@ export class CodexSecurity {
         pluginRoot: runtime.plugin.installedRoot,
         expectation,
         replayEvents,
-        onSettled: () => {
-          removeExternalAbort();
-          this.#handles.delete(handle);
+        onSettled: async () => {
+          try {
+            await removeTargetPathsFile(targetPathsFile);
+          } finally {
+            removeExternalAbort();
+            this.#handles.delete(handle);
+          }
         },
       });
       this.#handles.add(handle);
@@ -443,8 +517,14 @@ export class CodexSecurity {
       throw error;
     } finally {
       this.#preparations.delete(preparation);
-      markPreparationSettled();
-      if (!handedOff) removeExternalAbort();
+      try {
+        if (!handedOff) {
+          await removeTargetPathsFile(targetPathsFile);
+        }
+      } finally {
+        if (!handedOff) removeExternalAbort();
+        markPreparationSettled();
+      }
     }
   }
 
@@ -718,6 +798,17 @@ export async function initialCredentialsAvailable(
   return await importer(ambientHome, isolatedHome);
 }
 
+async function removeTargetPathsFile(path: string | null): Promise<void> {
+  if (path === null) return;
+  try {
+    await rm(path, { force: true });
+  } catch (error) {
+    if (process.platform !== "win32") throw error;
+    await chmod(path, 0o600);
+    await rm(path, { force: true });
+  }
+}
+
 interface ScanHandleOptions {
   thread: CodexThreadLike;
   events: AsyncGenerator<ScanEvent>;
@@ -726,7 +817,7 @@ interface ScanHandleOptions {
   pluginRoot: string;
   expectation: ScanExpectation;
   replayEvents?: boolean;
-  onSettled: () => void;
+  onSettled: () => void | Promise<void>;
 }
 
 export class ScanHandle {
@@ -870,18 +961,15 @@ export class ScanHandle {
       this.#eventLog.finish(error);
       throw error;
     } finally {
-      options.onSettled();
+      await options.onSettled();
     }
   }
 }
 
 async function scanPrompt(
   pluginRoot: string,
-  repository: string,
   target: NormalizedTarget,
   mode: ScanMode,
-  scanDir: string,
-  python: string,
 ): Promise<string> {
   const skillName = skillNameFor(target, mode);
   const skillPath = join(pluginRoot, "skills", skillName, "SKILL.md");
@@ -892,12 +980,13 @@ async function scanPrompt(
     );
   }
   return [
-    `Use the installed $codex-security:${skillName} skill at ${skillPath}.`,
+    `Use the installed $codex-security:${skillName} skill at "$CODEX_SECURITY_PLUGIN_ROOT/skills/${skillName}/SKILL.md".`,
     "Run this Codex Security scan non-interactively.",
     "This SDK host does not render MCP Apps; use the terminal/chat workflow.",
-    `Use ${JSON.stringify(python)} as <python_command> for every plugin helper; replace any literal python or python3 helper invocation with this exact interpreter.`,
-    `Repository root: ${repository}`,
-    `Use this exact scan directory for all scan output: ${scanDir}`,
+    'Use "$PYTHON" as <python_command> for every plugin helper; replace any literal python or python3 helper invocation with this exact interpreter.',
+    'Repository root: "$CODEX_SECURITY_REPOSITORY"',
+    'Use this exact scan directory for all scan output: "$CODEX_SECURITY_SCAN_DIR"',
+    "Runtime paths are environment-backed; keep them quoted in POSIX shells and use the corresponding $env: names in PowerShell. Do not copy or reparse their values.",
     targetInstruction(target),
     "Complete and seal the canonical JSON contract before returning.",
   ].join("\n");
@@ -913,14 +1002,11 @@ function targetInstruction(target: NormalizedTarget): string {
   if (target.kind === "repository")
     return "Scan target: the entire repository.";
   if (target.kind === "paths")
-    return `Scan target paths (JSON array): ${JSON.stringify(target.paths)
-      .replaceAll("\u0085", "\\u0085")
-      .replaceAll("\u2028", "\\u2028")
-      .replaceAll("\u2029", "\\u2029")}`;
+    return 'Scan target paths: generate the combined inventory once with "$PYTHON" "$CODEX_SECURITY_PLUGIN_ROOT/scripts/generate_rank_input.py" make-repo-rank-input --repo "$CODEX_SECURITY_REPOSITORY" --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE" --out "$CODEX_SECURITY_SCAN_DIR/artifacts/02_discovery/rank_input.jsonl". Before finalization, preserve every requested scope with "$PYTHON" "$CODEX_SECURITY_PLUGIN_ROOT/scripts/generate_rank_input.py" bind-repo-scopes --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE" --manifest "$CODEX_SECURITY_SCAN_DIR/scan-manifest.json" --coverage "$CODEX_SECURITY_SCAN_DIR/coverage.json". Do not print, evaluate, or modify the target-paths file.';
   if (target.kind === "refs") {
-    return `Scan target: Git diff from ${target.baseRef} to ${target.headRef}.`;
+    return `Scan target: Git diff from ${target.base} to ${target.head}.`;
   }
-  return `Scan target: staged and unstaged working-tree changes against ${target.baseRef}.`;
+  return `Scan target: staged and unstaged working-tree changes against ${target.base}.`;
 }
 
 async function collectResult(
@@ -1028,6 +1114,39 @@ function environmentApiKey(environment: ProcessEnvironment): string | null {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isCodexConfigObject(
+  value: unknown,
+): value is NonNullable<CodexOptions["config"]> {
+  return isRecord(value);
+}
+
+function shellEnvironmentPolicy(
+  policy: unknown,
+  runtimePaths: Record<string, string>,
+): NonNullable<CodexOptions["config"]> {
+  const configured = isCodexConfigObject(policy) ? policy : {};
+  const configuredSet = isCodexConfigObject(configured["set"])
+    ? configured["set"]
+    : {};
+  const includeOnly = configured["include_only"];
+  return {
+    ...configured,
+    set: { ...configuredSet, ...runtimePaths },
+    ...(Array.isArray(includeOnly)
+      ? {
+          include_only: [
+            ...new Set([
+              ...includeOnly.filter(
+                (value): value is string => typeof value === "string",
+              ),
+              ...Object.keys(runtimePaths),
+            ]),
+          ],
+        }
+      : {}),
+  };
 }
 
 function forwardAbort(
