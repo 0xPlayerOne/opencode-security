@@ -5,18 +5,22 @@ from __future__ import annotations
 
 import argparse
 import copy
+import csv
 import errno
 import hashlib
 import importlib.util
+import io
 import json
+import math
 import os
 import re
 import secrets
 import stat
+import sys
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, TextIO
+from typing import Any, BinaryIO, TextIO
 from urllib.parse import quote, urlsplit
 
 SCHEMA_VERSION = "1.0"
@@ -56,6 +60,35 @@ GITHUB_HASH_EOF = 65535
 GITHUB_HASH_MAX_LINES = 100_000
 SOURCE_READ_CHUNK_SIZE = 64 * 1024
 SOURCE_READ_MAX_BYTES = 10 * 1024 * 1024
+CONTRACT_DOCUMENT_MAX_BYTES = {
+    "scan-manifest.json": 16 * 1024 * 1024,
+    "findings.json": 128 * 1024 * 1024,
+    "coverage.json": 32 * 1024 * 1024,
+}
+SCHEMA_DOCUMENT_MAX_BYTES = 4 * 1024 * 1024
+JSON_DOCUMENT_READ_CHUNK_SIZE = 64 * 1024
+MAX_JSON_DEPTH = 256
+MAX_JSON_INTEGER = (1 << 53) - 1
+MAX_SCHEMA_NODES = 8192
+MAX_SCHEMA_COLLECTION_ENTRIES = 4096
+MAX_SCHEMA_APPLICATOR_EDGES = 128
+SAFE_SCHEMA_PATTERNS = {
+    r"^(?![^:/?#]+://[^/?#]*@)[^?#]+$",
+    r"^codex-security-snapshot/v1:sha256:[a-f0-9]{64}$",
+    r"^(?!/)(?!.*(?:^|/)\.\.(?:/|$))(?!.*\\).+$",
+    r"^[a-f0-9]{64}$",
+    r"^(?!.*(?:^|/)\.\.(?:/|$))(?!.*\\)artifacts/.+$",
+    r"^csf_[a-f0-9]{24}$",
+    r"^occ_[a-f0-9]{24}$",
+    r"^[a-z0-9][a-z0-9._/-]*$",
+    r"^codex-security/v1:sha256:[a-f0-9]{64}$",
+    r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$",
+}
+EXPORT_PATHS = {
+    "csv": "exports/findings.csv",
+    "json": "exports/findings.json",
+    "sarif": "exports/results.sarif",
+}
 
 
 class ContractError(ValueError):
@@ -72,9 +105,14 @@ def _loads_json(value: str | bytes) -> Any:
 
 def _read_json(path: Path) -> dict[str, Any]:
     try:
-        payload = _loads_json(path.read_text(encoding="utf-8"))
+        with path.open("rb") as handle:
+            raw = _read_bounded_json_document(handle, str(path), SCHEMA_DOCUMENT_MAX_BYTES)
+        payload = _loads_json(raw.decode("utf-8"))
+        _require_safe_json_value(payload, str(path))
     except FileNotFoundError as exc:
         raise ContractError(f"missing required contract artifact: {path}") from exc
+    except ContractError:
+        raise
     except ValueError as exc:
         raise ContractError(f"{path}: invalid JSON: {exc}") from exc
     if not isinstance(payload, dict):
@@ -114,6 +152,99 @@ def _json_bytes(payload: Any) -> bytes:
     except ValueError as exc:
         raise ContractError(f"cannot encode canonical JSON: {exc}") from exc
     return (encoded + "\n").encode("utf-8")
+
+
+def _contract_json_bytes(relative_path: str, payload: Any) -> bytes:
+    _require_safe_json_value(payload, relative_path)
+    encoded = _json_bytes(payload)
+    maximum = CONTRACT_DOCUMENT_MAX_BYTES.get(relative_path)
+    if maximum is not None and len(encoded) > maximum:
+        raise ContractError(f"{relative_path}: JSON document exceeds the {maximum}-byte limit")
+    return encoded
+
+
+def _read_bounded_json_document(handle: BinaryIO, context: str, maximum: int) -> bytes:
+    if os.fstat(handle.fileno()).st_size > maximum:
+        raise ContractError(f"{context}: JSON document exceeds the {maximum}-byte limit")
+    chunks: list[bytes] = []
+    length = 0
+    while length <= maximum:
+        chunk = handle.read(min(JSON_DOCUMENT_READ_CHUNK_SIZE, maximum + 1 - length))
+        if not chunk:
+            break
+        length += len(chunk)
+        if length > maximum:
+            raise ContractError(f"{context}: JSON document exceeds the {maximum}-byte limit")
+        chunks.append(chunk)
+    result = b"".join(chunks)
+    _require_json_nesting(result, context)
+    return result
+
+
+def _require_json_nesting(value: bytes, context: str) -> None:
+    depth = 0
+    in_string = False
+    escaped = False
+    for character in value:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == ord("\\"):
+                escaped = True
+            elif character == ord('"'):
+                in_string = False
+            continue
+        if character == ord('"'):
+            in_string = True
+        elif character in (ord("{"), ord("[")):
+            depth += 1
+            if depth > MAX_JSON_DEPTH + 1:
+                raise ContractError(
+                    f"{context}: JSON document exceeds the {MAX_JSON_DEPTH}-level nesting limit"
+                )
+        elif character in (ord("}"), ord("]")):
+            depth -= 1
+
+
+def _require_safe_json_value(value: Any, context: str, *, validate_strings: bool = True) -> None:
+    def visit(item: Any, location: str, depth: int) -> None:
+        if depth > MAX_JSON_DEPTH:
+            raise ContractError(
+                f"{location}: JSON document exceeds the {MAX_JSON_DEPTH}-level nesting limit"
+            )
+        if isinstance(item, dict):
+            for key, child in item.items():
+                if not isinstance(key, str):
+                    raise ContractError(f"{location}: expected string JSON property names")
+                if validate_strings:
+                    _require_safe_json_string(key, location)
+                visit(child, f"{location}.<property>", depth + 1)
+        elif isinstance(item, list):
+            for index, child in enumerate(item):
+                visit(child, f"{location}[{index}]", depth + 1)
+        elif isinstance(item, str) and validate_strings:
+            _require_safe_json_string(item, location)
+        elif isinstance(item, int) and not isinstance(item, bool):
+            if abs(item) > MAX_JSON_INTEGER:
+                raise ContractError(
+                    f"{location}: unsafe integer-valued JSON numbers are not supported"
+                )
+        elif isinstance(item, float):
+            if not math.isfinite(item):
+                raise ContractError(f"{location}: non-finite JSON numbers are not supported")
+            if item.is_integer() and abs(item) > MAX_JSON_INTEGER:
+                raise ContractError(
+                    f"{location}: unsafe integer-valued JSON numbers are not supported"
+                )
+
+    visit(value, context, 0)
+
+
+def _require_safe_json_string(value: str, context: str) -> None:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ContractError(f"{context}: expected well-formed Unicode JSON strings") from exc
 
 
 def _sha256_text(value: str) -> str:
@@ -370,16 +501,22 @@ def _read_scan_local_json_bytes(
     try:
         with os.fdopen(descriptor, "rb") as handle:
             descriptor = -1
-            raw = handle.read()
+            maximum = CONTRACT_DOCUMENT_MAX_BYTES.get(relative_path)
+            raw = (
+                handle.read()
+                if maximum is None
+                else _read_bounded_json_document(handle, context, maximum)
+            )
         try:
             payload = _loads_json(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError) as exc:
             raise ContractError(f"{context}: invalid JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise ContractError(f"{context}: expected a JSON object")
+        _require_safe_json_value(payload, context, validate_strings=False)
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-    if not isinstance(payload, dict):
-        raise ContractError(f"{context}: expected a JSON object")
     return payload, raw
 
 
@@ -402,9 +539,15 @@ def _sha256_scan_local_file(scan_dir: Path, relative_path: str, context: str) ->
     return digest.hexdigest()
 
 
-def write_scan_local_bytes(scan_dir: Path, relative_path: str, payload: bytes) -> None:
+def write_scan_local_bytes(
+    scan_dir: Path, relative_path: str, payload: bytes, *, external_name: bool = False
+) -> None:
     scan_dir = _require_scan_directory(scan_dir)
-    relative_path = _require_safe_relative_path(relative_path, "scan-local output path")
+    if external_name:
+        if relative_path in {"", ".", ".."} or "/" in relative_path or "\0" in relative_path:
+            raise ContractError("external output path: expected a safe file name")
+    else:
+        relative_path = _require_safe_relative_path(relative_path, "scan-local output path")
     path = scan_dir / relative_path
     if not _descriptor_relative_writes_available():
         if not _is_windows():
@@ -437,6 +580,8 @@ def write_scan_local_bytes(scan_dir: Path, relative_path: str, payload: bytes) -
         temp_fd = os.open(temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent_fd)
         with os.fdopen(temp_fd, "wb") as handle:
             handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(temp_name, parts[-1], src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
         temp_name = None
     finally:
@@ -483,7 +628,7 @@ def _remove_scan_local_file_if_exists(scan_dir: Path, relative_path: str) -> Non
 
 
 def _write_scan_local_json(scan_dir: Path, relative_path: str, payload: Any) -> None:
-    write_scan_local_bytes(scan_dir, relative_path, _json_bytes(payload))
+    write_scan_local_bytes(scan_dir, relative_path, _contract_json_bytes(relative_path, payload))
 
 
 def _validate_remote(remote: str, context: str) -> None:
@@ -921,6 +1066,7 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
             raise ContractError(f"coverage.{field}: expected an array")
     if completeness == "complete" and (has_needs_follow_up or coverage.get("deferred")):
         raise ContractError("coverage.completeness: complete coverage cannot have deferred work")
+    _require_safe_json_value(coverage, "coverage.json")
 
 
 def _validate_manifest(manifest: dict[str, Any]) -> None:
@@ -968,6 +1114,7 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
             raise ContractError(
                 f"manifest.scan.artifacts: missing required artifact: {required_path}"
             )
+    _require_safe_json_value(manifest, "scan-manifest.json")
 
 
 def _validate_findings(manifest: dict[str, Any], findings: dict[str, Any]) -> None:
@@ -991,6 +1138,7 @@ def _validate_findings(manifest: dict[str, Any], findings: dict[str, Any]) -> No
             raise ContractError(f"{context}: duplicate finding or occurrence id")
         finding_ids.add(finding_id)
         occurrence_ids.add(occurrence_id)
+    _require_safe_json_value(findings, "findings.json")
 
 
 def _schema_type_matches(value: Any, expected: str) -> bool:
@@ -1076,7 +1224,89 @@ def _validate_schema_node(value: Any, schema: dict[str, Any], context: str) -> N
 
 def validate_against_schema(payload: dict[str, Any], schema_path: Path) -> None:
     schema = _read_json(schema_path)
+    _require_safe_schema(schema, schema_path.name)
     _validate_schema_node(payload, schema, schema_path.stem)
+
+
+def _require_safe_schema(schema: dict[str, Any], context: str) -> None:
+    pending: list[tuple[Any, bool]] = [(schema, True)]
+    nodes = 0
+    applicator_edges = 0
+    unsupported_keywords = {
+        "$async",
+        "$ref",
+        "$dynamicRef",
+        "$recursiveRef",
+        "prefixItems",
+        "patternProperties",
+        "propertyNames",
+        "dependentSchemas",
+        "dependencies",
+        "uniqueItems",
+    }
+    while pending:
+        value, is_schema = pending.pop()
+        nodes += 1
+        if nodes > MAX_SCHEMA_NODES:
+            raise ContractError(
+                f"{context}: JSON Schema exceeds the {MAX_SCHEMA_NODES}-node complexity limit"
+            )
+        if isinstance(value, list):
+            if len(value) > MAX_SCHEMA_COLLECTION_ENTRIES:
+                raise ContractError(
+                    f"{context}: JSON Schema exceeds the "
+                    f"{MAX_SCHEMA_COLLECTION_ENTRIES}-entry collection limit"
+                )
+            pending.extend((child, is_schema) for child in value)
+            continue
+        if not isinstance(value, dict):
+            continue
+        if len(value) > MAX_SCHEMA_COLLECTION_ENTRIES:
+            raise ContractError(
+                f"{context}: JSON Schema exceeds the "
+                f"{MAX_SCHEMA_COLLECTION_ENTRIES}-entry collection limit"
+            )
+        for keyword, child in value.items():
+            if not is_schema:
+                pending.append((child, False))
+                continue
+            if keyword in unsupported_keywords:
+                raise ContractError(f"{context}: unsupported JSON Schema keyword")
+            edges = 0
+            if keyword in {"allOf", "anyOf", "oneOf"} and isinstance(child, list):
+                edges = len(child)
+            elif keyword in {
+                "if",
+                "then",
+                "else",
+                "not",
+                "items",
+                "contains",
+                "additionalProperties",
+                "unevaluatedProperties",
+                "unevaluatedItems",
+            } and isinstance(child, (dict, bool)):
+                edges = 1
+            elif keyword in {"properties", "$defs", "definitions"} and isinstance(child, dict):
+                edges = len(child)
+            applicator_edges += edges
+            if applicator_edges > MAX_SCHEMA_APPLICATOR_EDGES:
+                raise ContractError(
+                    f"{context}: JSON Schema exceeds the "
+                    f"{MAX_SCHEMA_APPLICATOR_EDGES}-edge applicator limit"
+                )
+            if keyword == "pattern" and isinstance(child, str):
+                if child not in SAFE_SCHEMA_PATTERNS:
+                    raise ContractError(f"{context}: unsupported JSON Schema pattern")
+            if keyword in {"properties", "$defs", "definitions"} and isinstance(child, dict):
+                pending.extend((child_schema, True) for child_schema in child.values())
+                continue
+            pending.append(
+                (
+                    child,
+                    keyword not in {"const", "enum", "default", "examples", "dependentRequired"},
+                )
+            )
 
 
 def _validate_canonical_schemas_before_projection(
@@ -1489,16 +1719,16 @@ def _validate_existing_seal(
             raise ContractError(f"{context}: sealed artifact changed or is missing")
 
 
-def write_sarif_projection(
-    scan_dir: Path, source_root: Path | None = None, schema_dir: Path | None = None
-) -> None:
+def _read_sealed_scan(
+    scan_dir: Path, schema_dir: Path | None, required_for: str
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], bytes]:
     scan_dir = _require_scan_directory(scan_dir)
     schema_dir = schema_dir or Path(__file__).resolve().parent.parent / "schemas"
     manifest = _read_scan_local_json(scan_dir, "scan-manifest.json", "scan-manifest.json")
     scan = _require_dict(manifest, "scan", "manifest")
     _validate_contract_refs(scan)
     if scan.get("sealedAt") is None or scan.get("artifacts") is None:
-        raise ContractError("manifest.scan: SARIF projection requires a sealed scan")
+        raise ContractError(f"manifest.scan: {required_for} requires a sealed scan")
     findings, findings_bytes = _read_scan_local_json_bytes(
         scan_dir, scan["findingsRef"], scan["findingsRef"]
     )
@@ -1521,9 +1751,205 @@ def write_sarif_projection(
     validate_against_schema(findings, schema_dir / "findings.schema.json")
     validate_against_schema(coverage, schema_dir / "coverage.schema.json")
     _validate_derived_finding_identities(manifest, findings)
+    return manifest, findings, coverage, findings_bytes
+
+
+def build_sarif_projection(
+    scan_dir: Path, source_root: Path | None = None, schema_dir: Path | None = None
+) -> dict[str, Any]:
+    if source_root is not None:
+        try:
+            source_root = source_root.resolve(strict=True)
+            source_root_is_directory = source_root.is_dir()
+        except (OSError, RuntimeError):
+            source_root_is_directory = False
+        if not source_root_is_directory:
+            raise ContractError("source root: expected an existing directory")
+    manifest, findings, _, _ = _read_sealed_scan(scan_dir, schema_dir, "SARIF projection")
     sarif = build_sarif(manifest, findings, source_root)
     _validate_sarif(sarif)
+    return sarif
+
+
+def write_sarif_projection(
+    scan_dir: Path, source_root: Path | None = None, schema_dir: Path | None = None
+) -> None:
+    sarif = build_sarif_projection(scan_dir, source_root, schema_dir)
     _write_scan_local_json(scan_dir, "exports/results.sarif", sarif)
+
+
+def write_sarif_output(scan_dir: Path, output: Path, sarif: dict[str, Any]) -> None:
+    write_export_output(scan_dir, output, "sarif", _json_bytes(sarif))
+
+
+def csv_cell(value: Any) -> Any:
+    if isinstance(value, str) and (
+        value.startswith(("\t", "\r", "\n"))
+        or value.lstrip().startswith(("=", "+", "-", "@", "＝", "＋", "－", "＠"))
+    ):
+        return f"'{value}"
+    return value
+
+
+def finding_candidate_id(finding: dict[str, Any]) -> str | None:
+    extensions = finding.get("extensions")
+    if not isinstance(extensions, dict):
+        return None
+    return next(
+        (
+            value
+            for field in ("candidateId", "reportId", "ledgerRowId")
+            if isinstance(value := extensions.get(field), str) and value.strip()
+        ),
+        None,
+    )
+
+
+def build_csv_projection(findings: dict[str, Any], coverage: dict[str, Any]) -> bytes:
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    deep_scan = coverage.get("mode") == "deep_repository" or (
+        coverage.get("mode") == "scoped_path"
+        and any(
+            isinstance(finding.get("extensions"), dict)
+            and any(
+                isinstance(finding["extensions"].get(field), str)
+                and finding["extensions"][field].strip()
+                for field in ("candidateId", "reportId")
+            )
+            for finding in findings["findings"]
+        )
+    )
+    writer.writerow(
+        (
+            "occurrence_id",
+            "finding_id",
+            *(("candidate_id",) if deep_scan else ()),
+            "title",
+            "summary",
+            "severity",
+            "confidence",
+            "status",
+            "close_reason",
+            "note",
+            "remediation",
+            "path",
+            "start_line",
+            "end_line",
+        )
+    )
+    for finding in findings["findings"]:
+        locations = finding["locations"]
+        location = next(
+            (candidate for candidate in locations if candidate.get("role") == "root_control"),
+            locations[0],
+        )
+        writer.writerow(
+            (
+                csv_cell(finding["occurrenceId"]),
+                csv_cell(finding["findingId"]),
+                *((csv_cell(finding_candidate_id(finding)),) if deep_scan else ()),
+                csv_cell(finding["title"]),
+                csv_cell(finding["summary"]),
+                csv_cell(finding["severity"]["level"]),
+                csv_cell(finding["confidence"]["level"]),
+                "open",
+                "",
+                "",
+                csv_cell(finding["remediation"]),
+                csv_cell(location["path"]),
+                location["startLine"],
+                location.get("endLine", location["startLine"]),
+            )
+        )
+    return output.getvalue().encode("utf-8")
+
+
+def build_findings_export(
+    scan_dir: Path,
+    export_format: str,
+    source_root: Path | None = None,
+    schema_dir: Path | None = None,
+) -> bytes:
+    if export_format not in EXPORT_PATHS:
+        raise ContractError(f"unsupported export format: {export_format}")
+    if export_format == "sarif":
+        return _json_bytes(build_sarif_projection(scan_dir, source_root, schema_dir))
+    if source_root is not None:
+        raise ContractError("source-root is only supported for SARIF exports")
+    _, findings, coverage, findings_bytes = _read_sealed_scan(
+        scan_dir, schema_dir, f"{export_format.upper()} export"
+    )
+    if export_format == "json":
+        return findings_bytes
+    return build_csv_projection(findings, coverage)
+
+
+def write_export_output(scan_dir: Path, output: Path, export_format: str, contents: bytes) -> None:
+    if export_format not in EXPORT_PATHS:
+        raise ContractError(f"unsupported export format: {export_format}")
+    scan_dir = _require_scan_directory(scan_dir)
+    output = Path(os.path.abspath(output))
+    try:
+        relative_output = output.relative_to(scan_dir).as_posix()
+    except ValueError:
+        for ancestor in output.parents:
+            try:
+                inside_scan = ancestor.samefile(scan_dir)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise ContractError(
+                    "export output path: unable to inspect output directory"
+                ) from exc
+            if inside_scan:
+                if any(parent.is_symlink() for parent in (ancestor, *ancestor.parents)):
+                    raise ContractError(
+                        "export output path: symbolic links cannot alias the scan directory"
+                    ) from None
+                relative_output = output.relative_to(ancestor).as_posix()
+                break
+        else:
+            write_scan_local_bytes(output.parent, output.name, contents, external_name=True)
+            return
+    if relative_output != EXPORT_PATHS[export_format]:
+        raise ContractError(f"{export_format.upper()} output path cannot overwrite a scan artifact")
+    manifest = _read_scan_local_json(scan_dir, "scan-manifest.json", "scan-manifest.json")
+    scan = _require_dict(manifest, "scan", "manifest")
+    artifacts = _require_list(scan, "artifacts", "manifest.scan")
+    artifact_paths = [
+        _require_safe_relative_path(
+            _require_str(artifact, "path", f"manifest.scan.artifacts[{index}]"),
+            f"manifest.scan.artifacts[{index}].path",
+        )
+        for index, artifact in enumerate(artifacts)
+        if isinstance(artifact, dict)
+    ]
+    try:
+        output_metadata = output.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        output_metadata = None
+    except OSError as exc:
+        raise ContractError(f"{relative_output}: unable to inspect export output") from exc
+    for artifact_path in artifact_paths:
+        if artifact_path == relative_output:
+            raise ContractError(
+                f"{export_format.upper()} output path cannot overwrite a sealed scan artifact"
+            )
+        if output_metadata is None:
+            continue
+        descriptor = open_scan_local_file_descriptor(
+            scan_dir, artifact_path, f"sealed artifact {artifact_path}"
+        )
+        try:
+            artifact_metadata = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        if os.path.samestat(output_metadata, artifact_metadata):
+            raise ContractError(
+                f"{export_format.upper()} output path cannot overwrite a sealed scan artifact"
+            )
+    write_scan_local_bytes(scan_dir, relative_output, contents)
 
 
 def _write_sarif_projection_if_possible(
@@ -1632,8 +2058,8 @@ def _prepare_scan_finalization(
             report_markdown_bytes,
         )
 
-    findings_bytes = _json_bytes(findings)
-    coverage_bytes = _json_bytes(coverage)
+    findings_bytes = _contract_json_bytes("findings.json", findings)
+    coverage_bytes = _contract_json_bytes("coverage.json", coverage)
     report_markdown_bytes = _generate_report_projection(manifest, findings, coverage)
     _validate_report_output_paths(scan_dir)
     scan["artifacts"] = [
@@ -1649,6 +2075,7 @@ def _prepare_scan_finalization(
     validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
     validate_against_schema(findings, schema_dir / "findings.schema.json")
     validate_against_schema(coverage, schema_dir / "coverage.schema.json")
+    _contract_json_bytes("scan-manifest.json", manifest)
     return (
         scan_dir,
         schema_dir,
@@ -1714,9 +2141,34 @@ def main() -> int:
     parser.add_argument("--scan-dir", required=True, type=Path)
     parser.add_argument("--schema-dir", type=Path)
     parser.add_argument("--source-root", type=Path)
+    parser.add_argument("--sarif-only", action="store_true")
+    parser.add_argument("--sarif-output", type=Path)
+    parser.add_argument("--export-format", choices=sorted(EXPORT_PATHS))
+    parser.add_argument("--export-output", type=Path)
     args = parser.parse_args()
     try:
-        finalize_scan(args.scan_dir, args.schema_dir, args.source_root)
+        if args.sarif_only and args.export_format is not None:
+            parser.error("--sarif-only cannot be combined with --export-format")
+        if args.export_output is not None and args.export_format is None:
+            parser.error("--export-output requires --export-format")
+        if args.sarif_output is not None and not args.sarif_only:
+            parser.error("--sarif-output requires --sarif-only")
+        if args.export_format is not None:
+            contents = build_findings_export(
+                args.scan_dir, args.export_format, args.source_root, args.schema_dir
+            )
+            if args.export_output is None:
+                sys.stdout.buffer.write(contents)
+            else:
+                write_export_output(args.scan_dir, args.export_output, args.export_format, contents)
+        elif args.sarif_only:
+            sarif = build_sarif_projection(args.scan_dir, args.source_root, args.schema_dir)
+            if args.sarif_output is None:
+                sys.stdout.buffer.write(_json_bytes(sarif))
+            else:
+                write_sarif_output(args.scan_dir, args.sarif_output, sarif)
+        else:
+            finalize_scan(args.scan_dir, args.schema_dir, args.source_root)
     except ContractError as exc:
         parser.error(str(exc))
     return 0

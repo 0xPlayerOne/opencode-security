@@ -1,15 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { constants } from "node:fs";
-import {
-  lstat,
-  mkdir,
-  open,
-  rename,
-  unlink,
-  type FileHandle,
-} from "node:fs/promises";
+import { mkdir, open, rename, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { parse } from "smol-toml";
+import { stringify } from "smol-toml";
 import { ConfigurationError } from "./errors.js";
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -26,20 +18,8 @@ export interface CodexSecurityConfig {
 
 export const DEFAULT_CODEX_CONFIG: Readonly<JsonObject> = {
   cli_auth_credentials_store: "file",
-  features: {
-    plugins: true,
-    multi_agent: true,
-    enable_fanout: true,
-    goals: true,
-  },
-  agents: {
-    max_threads: 12,
-    max_depth: 2,
-  },
-};
-
-export const NATIVE_V2_CODEX_CONFIG: Readonly<JsonObject> = {
-  cli_auth_credentials_store: "file",
+  model: "gpt-5.6-sol",
+  model_reasoning_effort: "xhigh",
   features: {
     plugins: true,
     goals: true,
@@ -51,27 +31,18 @@ export const NATIVE_V2_CODEX_CONFIG: Readonly<JsonObject> = {
 };
 
 deepFreezeJson(DEFAULT_CODEX_CONFIG);
-deepFreezeJson(NATIVE_V2_CODEX_CONFIG);
-
-const BARE_KEY = /^[A-Za-z0-9_-]+$/;
 
 export async function mergedCodexConfig(
   config: CodexSecurityConfig,
-  options: { pluginRoot?: string } = {},
 ): Promise<JsonObject> {
   if (config.codexOverrides !== undefined && !isObject(config.codexOverrides)) {
     throw new ConfigurationError("codexOverrides must be an object.");
   }
+  validateOverrideKeys(config.codexOverrides ?? {});
   const overrides = cloneJson(config.codexOverrides ?? {});
   validateOverrides(overrides);
-  const nativeV2 =
-    options.pluginRoot !== undefined &&
-    (await supportsNativeMultiAgentV2(options.pluginRoot));
-  if (nativeV2) {
-    validateNativeMultiAgentV2Overrides(overrides);
-  }
-  const defaults = nativeV2 ? NATIVE_V2_CODEX_CONFIG : DEFAULT_CODEX_CONFIG;
-  return deepMerge(cloneJson(defaults), overrides);
+  validateNativeMultiAgentV2Overrides(overrides);
+  return deepMerge(cloneJson(DEFAULT_CODEX_CONFIG), overrides);
 }
 
 export async function writeCodexConfig(
@@ -80,9 +51,14 @@ export async function writeCodexConfig(
 ): Promise<void> {
   const parent = dirname(path);
   await mkdir(parent, { recursive: true, mode: 0o700 });
-  const lines = flatten(config).map(
-    ([keys, value]) => `${keys.map(tomlKey).join(".")} = ${tomlValue(value)}`,
-  );
+  let contents: string;
+  try {
+    contents = stringify(config);
+  } catch (error) {
+    throw new ConfigurationError("Invalid Codex configuration.", {
+      cause: error,
+    });
+  }
   const temporary = join(parent, `.${randomUUID()}.config.toml.tmp`);
   let created = false;
   try {
@@ -90,7 +66,7 @@ export async function writeCodexConfig(
     created = true;
     try {
       await handle.chmod(0o600);
-      await handle.writeFile(`${lines.join("\n")}\n`, "utf8");
+      await handle.writeFile(contents, "utf8");
       await handle.sync();
     } finally {
       await handle.close();
@@ -104,140 +80,18 @@ export async function writeCodexConfig(
   }
 }
 
-async function supportsNativeMultiAgentV2(
-  pluginRoot: string,
-): Promise<boolean> {
-  const profilesPath = join(
-    pluginRoot,
-    "preflight",
-    "capability-profiles.toml",
-  );
-  let source: string;
-  let file: FileHandle | undefined;
-  let discovered = false;
-  try {
-    const parent = dirname(profilesPath);
-    const parentMetadata = await lstat(parent);
-    const metadata = await lstat(profilesPath);
-    discovered = true;
-    if (!metadata.isFile() || metadata.isSymbolicLink()) {
-      throw new Error("capability profile is not a regular file");
+function validateOverrideKeys(value: JsonValue): void {
+  if (Array.isArray(value)) {
+    for (const item of value) validateOverrideKeys(item);
+    return;
+  }
+  if (!isObject(value)) return;
+  for (const [key, item] of Object.entries(value)) {
+    if (["__proto__", "constructor", "prototype"].includes(key)) {
+      throw new ConfigurationError(`Invalid Codex override key: ${key}.`);
     }
-    file = await open(
-      profilesPath,
-      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-    );
-    const opened = await file.stat();
-    if (
-      !opened.isFile() ||
-      opened.dev !== metadata.dev ||
-      opened.ino !== metadata.ino
-    ) {
-      throw new Error("capability profile changed before reading");
-    }
-    const bytes = await file.readFile();
-    const currentParent = await lstat(parent);
-    const current = await lstat(profilesPath);
-    if (
-      !currentParent.isDirectory() ||
-      currentParent.isSymbolicLink() ||
-      currentParent.dev !== parentMetadata.dev ||
-      currentParent.ino !== parentMetadata.ino ||
-      !current.isFile() ||
-      current.isSymbolicLink() ||
-      current.dev !== opened.dev ||
-      current.ino !== opened.ino
-    ) {
-      throw new Error("capability profile changed while reading");
-    }
-    source = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch (error) {
-    const code = nodeErrorCode(error);
-    if (code === "ENOENT" && !discovered) {
-      return false;
-    }
-    throw new ConfigurationError(
-      `Selected plugin has an unreadable capability profile: ${profilesPath}: ${String(error)}`,
-      { cause: error },
-    );
-  } finally {
-    await file?.close();
+    validateOverrideKeys(item);
   }
-
-  let data: unknown;
-  try {
-    data = parse(source);
-  } catch (error) {
-    throw new ConfigurationError(
-      `Selected plugin has an unreadable capability profile: ${profilesPath}: ${String(error)}`,
-      { cause: error },
-    );
-  }
-  if (!isObject(data)) {
-    throw new ConfigurationError(
-      "Selected plugin capability profiles must be a TOML table.",
-    );
-  }
-  const profiles = data["profiles"] ?? {};
-  if (!isObject(profiles)) {
-    throw new ConfigurationError(
-      "Selected plugin capability profiles must be a TOML table.",
-    );
-  }
-  const deepProfile = profiles["deep_security_scan"];
-  if (deepProfile === undefined) {
-    return false;
-  }
-  if (!isObject(deepProfile)) {
-    throw new ConfigurationError(
-      "Selected plugin deep_security_scan capability profile must be a TOML table.",
-    );
-  }
-  const requirements = deepProfile["requirements"] ?? [];
-  if (!Array.isArray(requirements) || !requirements.every(isObject)) {
-    throw new ConfigurationError(
-      "Selected plugin deep_security_scan requirements must be TOML tables.",
-    );
-  }
-  if (
-    requirements.some(
-      (requirement) =>
-        requirement["capability"] === "native_multi_agent_v2" &&
-        requirement["severity"] === "block",
-    )
-  ) {
-    return true;
-  }
-
-  const remediation = deepProfile["remediation"] ?? {};
-  if (!isObject(remediation)) {
-    throw new ConfigurationError(
-      "Selected plugin deep_security_scan remediation must be a TOML table.",
-    );
-  }
-  const variants = remediation["variants"] ?? [];
-  if (!Array.isArray(variants) || !variants.every(isObject)) {
-    throw new ConfigurationError(
-      "Selected plugin deep_security_scan remediation variants must be TOML tables.",
-    );
-  }
-  for (const variant of variants) {
-    if (variant["mode"] !== "v2") {
-      continue;
-    }
-    const patches = variant["patches"] ?? [];
-    if (!Array.isArray(patches) || !patches.every(isObject)) {
-      throw new ConfigurationError(
-        "Selected plugin v2 remediation patches must be TOML tables.",
-      );
-    }
-    return patches.some(
-      (patch) =>
-        patch["path"] === "features.multi_agent_v2.enabled" &&
-        patch["value"] === true,
-    );
-  }
-  return false;
 }
 
 function validateOverrides(overrides: JsonObject): void {
@@ -353,114 +207,12 @@ function validateNativeMultiAgentV2Overrides(overrides: JsonObject): void {
 function deepMerge(base: JsonObject, overrides: JsonObject): JsonObject {
   for (const [key, value] of Object.entries(overrides)) {
     const existing = Object.hasOwn(base, key) ? base[key] : undefined;
-    const merged =
+    base[key] =
       isObject(value) && isObject(existing)
         ? deepMerge({ ...existing }, value)
         : cloneJson(value);
-    Object.defineProperty(base, key, {
-      value: merged,
-      enumerable: true,
-      configurable: true,
-      writable: true,
-    });
   }
   return base;
-}
-
-function flatten(
-  value: JsonObject,
-  prefix: readonly string[] = [],
-): Array<[readonly string[], Exclude<JsonValue, JsonObject>]> {
-  const result: Array<[readonly string[], Exclude<JsonValue, JsonObject>]> = [];
-  for (const key of Object.keys(value).sort()) {
-    if (key.length === 0) {
-      throw new ConfigurationError(
-        "Codex configuration keys must be non-empty strings.",
-      );
-    }
-    const item = value[key];
-    if (item === undefined) {
-      throw new ConfigurationError(
-        `Missing Codex configuration value at ${[...prefix, key].join(".")}.`,
-      );
-    }
-    const path = [...prefix, key];
-    if (isObject(item)) {
-      if (Object.keys(item).length === 0) {
-        throw new ConfigurationError(
-          `Empty Codex configuration object at ${path.join(".")}.`,
-        );
-      }
-      result.push(...flatten(item, path));
-    } else {
-      result.push([path, item]);
-    }
-  }
-  return result;
-}
-
-function tomlKey(value: string): string {
-  requireWellFormedTomlString(value);
-  return BARE_KEY.test(value) ? value : JSON.stringify(value);
-}
-
-function tomlValue(value: Exclude<JsonValue, JsonObject>): string {
-  if (typeof value === "boolean") {
-    return value ? "true" : "false";
-  }
-  if (typeof value === "string") {
-    requireWellFormedTomlString(value);
-    return JSON.stringify(value);
-  }
-  if (typeof value === "number") {
-    if (Number.isNaN(value)) return "nan";
-    if (value === Number.POSITIVE_INFINITY) return "inf";
-    if (value === Number.NEGATIVE_INFINITY) return "-inf";
-    if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
-      throw new ConfigurationError(
-        "TOML-backed Codex overrides cannot contain unsafe integer values.",
-      );
-    }
-    return String(value);
-  }
-  if (Array.isArray(value)) {
-    return `[${value
-      .map((item) => (isObject(item) ? tomlInlineTable(item) : tomlValue(item)))
-      .join(", ")}]`;
-  }
-  if (value === null) {
-    throw new ConfigurationError(
-      "TOML-backed Codex overrides cannot contain null values.",
-    );
-  }
-  return unsupportedValue(value);
-}
-
-function tomlInlineTable(value: JsonObject): string {
-  const entries = Object.keys(value)
-    .sort()
-    .map((key) => {
-      if (key.length === 0) {
-        throw new ConfigurationError(
-          "Codex configuration keys must be non-empty strings.",
-        );
-      }
-      const item = value[key];
-      if (item === undefined) {
-        throw new ConfigurationError(
-          `Missing Codex configuration value at ${key}.`,
-        );
-      }
-      return `${tomlKey(key)} = ${isObject(item) ? tomlInlineTable(item) : tomlValue(item)}`;
-    });
-  return `{ ${entries.join(", ")} }`;
-}
-
-function unsupportedValue(value: unknown): never {
-  const type = Array.isArray(value) ? "array" : typeof value;
-  throw new ConfigurationError(
-    `Unsupported Codex configuration value: ${type}`,
-  );
 }
 
 function cloneJson<T extends JsonValue>(value: T): T {
@@ -483,18 +235,4 @@ function isObject(value: unknown): value is Record<string, JsonValue> {
   }
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
-}
-
-function requireWellFormedTomlString(value: string): void {
-  if (Buffer.from(value, "utf8").toString("utf8") !== value) {
-    throw new ConfigurationError(
-      "TOML-backed Codex overrides cannot contain malformed Unicode strings.",
-    );
-  }
-}
-
-function nodeErrorCode(error: unknown): string | undefined {
-  return typeof error === "object" && error !== null && "code" in error
-    ? String(error.code)
-    : undefined;
 }

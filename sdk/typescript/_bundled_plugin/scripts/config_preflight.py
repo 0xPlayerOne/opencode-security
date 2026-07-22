@@ -489,22 +489,22 @@ def resolve_multi_agent_context(
     if runtime_session_cap is not None and version != "v2":
         raise ValueError("--multi-agent-session-cap is valid only for a V2 runtime")
 
-    backend_found, backend_cap, backend_source = lookup_config_value(
-        "backend_config.max_multiagent_concurrency",
+    bridge_cap_found, bridge_cap, bridge_cap_source = lookup_config_value(
+        "multiagent_config.max_concurrency",
         config_layers=config_layers,
         effective_config=effective_config,
         config_profile=config_profile,
     )
-    if backend_found and owner != "codex-bridge":
+    if bridge_cap_found and owner != "codex-bridge":
         raise ValueError(
-            "backend_config.max_multiagent_concurrency does not prove bridge ownership; "
+            "multiagent_config.max_concurrency does not prove bridge ownership; "
             "pass --multi-agent-runtime-owner codex-bridge only when the active runtime "
             "is verified as bridge-managed"
         )
-    if backend_found and runtime_session_cap is not None and backend_cap != runtime_session_cap:
+    if bridge_cap_found and runtime_session_cap is not None and bridge_cap != runtime_session_cap:
         raise ValueError(
-            "conflicting bridge concurrency facts: backend_config.max_multiagent_concurrency "
-            f"from {backend_source} is {backend_cap!r}, but --multi-agent-session-cap is "
+            "conflicting bridge concurrency facts: multiagent_config.max_concurrency "
+            f"from {bridge_cap_source} is {bridge_cap!r}, but --multi-agent-session-cap is "
             f"{runtime_session_cap!r}"
         )
 
@@ -569,7 +569,7 @@ def evaluate_multi_agent_capacity(
             path = "runtime.multi_agent.session_cap"
             found, actual, source = True, runtime_session_cap, "runtime-fact"
         elif multi_agent_context["owner"] == "codex-bridge":
-            path = "backend_config.max_multiagent_concurrency"
+            path = "multiagent_config.max_concurrency"
             found, actual, source = lookup_config_value(
                 path,
                 config_layers=config_layers,

@@ -1,7 +1,16 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import {
+  chmod,
+  mkdtemp,
+  mkdir,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
@@ -143,6 +152,135 @@ describe("scan target normalization", () => {
     ).rejects.toThrow("unknown Git ref");
   });
 
+  test.skipIf(process.platform === "win32")(
+    "does not execute repository-local Git shims from PATH",
+    async () => {
+      const repo = await repository();
+      const root = join(repo, "..");
+      const unsafeBin = join(repo, "node_modules", ".bin");
+      const linkedBin = join(root, "linked-bin");
+      const marker = join(root, "git-executed");
+      const unsafeGit = join(unsafeBin, "git");
+      const revision = git(repo, "rev-parse", "HEAD");
+      await mkdir(unsafeBin, { recursive: true });
+      await mkdir(linkedBin);
+      await writeFile(
+        unsafeGit,
+        `#!/bin/sh\nprintf 'executed\\n' > '${marker}'\nprintf 'malicious\\n'\n`,
+      );
+      await chmod(unsafeGit, 0o700);
+      await symlink(unsafeGit, join(linkedBin, "git"));
+
+      const script = `
+        const { repositoryRevision } = await import(process.argv[1]);
+        console.log(await repositoryRevision(process.argv[2]));
+      `;
+      const result = spawnSync(
+        process.execPath,
+        [
+          "-e",
+          script,
+          fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
+          repo,
+        ],
+        {
+          cwd: repo,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            PATH: [
+              unsafeBin,
+              linkedBin,
+              "node_modules/.bin",
+              "",
+              process.env["PATH"] ?? "",
+            ].join(delimiter),
+          },
+        },
+      );
+      expect(result.status).toBe(0);
+      expect(result.stdout.trim()).toBe(revision);
+      expect(existsSync(marker)).toBe(false);
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "does not execute worktree-local Git shims when scanning a subdirectory",
+    async () => {
+      const repo = await repository();
+      const target = join(repo, "src");
+      const unsafeBin = join(repo, "node_modules", ".bin");
+      const marker = join(repo, "git-executed");
+      const unsafeGit = join(unsafeBin, "git");
+      const revision = git(repo, "rev-parse", "HEAD");
+      await mkdir(unsafeBin, { recursive: true });
+      await writeFile(
+        unsafeGit,
+        `#!/bin/sh\nprintf 'executed\\n' > '${marker}'\nprintf 'malicious\\n'\n`,
+      );
+      await chmod(unsafeGit, 0o700);
+
+      const script = `
+        const { enclosingGitWorktreeRoot, repositoryRevision } = await import(process.argv[1]);
+        console.log(await enclosingGitWorktreeRoot(process.argv[2]));
+        console.log(await repositoryRevision(process.argv[2]));
+      `;
+      const result = spawnSync(
+        process.execPath,
+        [
+          "-e",
+          script,
+          fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
+          target,
+        ],
+        {
+          cwd: target,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            PATH: [unsafeBin, process.env["PATH"] ?? ""].join(delimiter),
+          },
+        },
+      );
+      expect(result.status).toBe(0);
+      expect(result.stdout.trim().split(/\r?\n/u)).toEqual([repo, revision]);
+      expect(existsSync(marker)).toBe(false);
+    },
+  );
+
+  test("keeps the requested base and head when refs diverge", async () => {
+    const repo = await repository();
+    git(repo, "checkout", "-b", "feature");
+    await writeFile(
+      join(repo, "src", "feature.ts"),
+      "export const feature = true;\n",
+    );
+    git(repo, "add", ".");
+    git(repo, "commit", "-m", "feature");
+    const head = git(repo, "rev-parse", "HEAD");
+    git(repo, "checkout", "main");
+    await writeFile(
+      join(repo, "src", "upstream.ts"),
+      "export const upstream = true;\n",
+    );
+    git(repo, "add", ".");
+    git(repo, "commit", "-m", "upstream");
+    const base = git(repo, "rev-parse", "HEAD");
+
+    expect(
+      await normalizeTarget(
+        repo,
+        DiffTarget.refs({ base: "main", head: "feature" }),
+      ),
+    ).toMatchObject({
+      kind: "refs",
+      base,
+      head,
+      baseRef: "main",
+      headRef: "feature",
+    });
+  });
+
   test("requires the Git worktree root", async () => {
     const repo = await repository();
     await expect(
@@ -235,10 +373,11 @@ describe("scan target normalization", () => {
       },
     );
     expect(result.status).toBe(0);
+    const canonicalProject = await realpath(project);
     expect(result.stdout.trim().split(/\r?\n/)).toEqual([
-      project,
-      project,
-      project,
+      canonicalProject,
+      canonicalProject,
+      canonicalProject,
     ]);
   });
 });

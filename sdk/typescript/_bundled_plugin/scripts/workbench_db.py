@@ -45,7 +45,9 @@ from finalize_scan_contract import (
     ContractError,
     _prepare_scan_finalization,
     _write_prepared_scan_finalization,
+    csv_cell,
     finalize_scan,
+    finding_candidate_id,
     open_scan_local_file_descriptor,
     write_sarif_projection,
     write_scan_local_bytes,
@@ -2379,8 +2381,7 @@ def write_csv_export(connection: sqlite3.Connection, scan: sqlite3.Row) -> Path:
             if not isinstance(finding, dict):
                 raise SystemExit("findings.json entries must be objects.")
             occurrence_id = finding.get("occurrenceId")
-            extensions = finding.get("extensions")
-            candidate_id = extensions.get("candidateId") if isinstance(extensions, dict) else None
+            candidate_id = finding_candidate_id(finding)
             if isinstance(occurrence_id, str) and isinstance(candidate_id, str):
                 candidate_ids_by_occurrence[occurrence_id] = candidate_id
     columns = (
@@ -2475,12 +2476,6 @@ def finding_export_rows(connection: sqlite3.Connection, scan_id: str) -> sqlite3
         """,
         (scan_id,),
     )
-
-
-def csv_cell(value: Any) -> Any:
-    if isinstance(value, str) and value.startswith(("=", "+", "-", "@", "\t", "\r")):
-        return f"'{value}"
-    return value
 
 
 def require_remediation_transition(current: str, requested: str) -> None:

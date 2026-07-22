@@ -1,9 +1,9 @@
 /// <reference lib="esnext.disposable" preserve="true" />
 
-import { chmod, lstat, mkdir, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, realpath, rm, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
-import { basename, isAbsolute, join, relative, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { Codex, type CodexOptions } from "@openai/codex-sdk";
 import {
   accountStatus,
@@ -15,6 +15,7 @@ import {
 import {
   mergedCodexConfig,
   type CodexSecurityConfig,
+  type JsonObject,
   writeCodexConfig,
 } from "./config.js";
 import {
@@ -26,18 +27,23 @@ import {
   AuthenticationRequiredError,
   CodexSecurityError,
   IncompleteScanError,
-  InvalidTargetError,
   OutputDirectoryError,
+  OutputInsideProtectedRootError,
+  type ProtectedScanPathKind,
   ScanInterruptedError,
-  UnsupportedCodexSdkCapabilityError,
 } from "./errors.js";
 import { ScanResult, type TurnResultMetadata } from "./result.js";
+import {
+  workerStatusFromEvent,
+  type ScanWorkerStatus,
+} from "./worker-progress.js";
 import {
   bootstrapPlugin,
   cleanupSdkDirectory,
   createIsolatedHome,
   importAmbientAuth,
   pluginExecutionEnvironment,
+  planOutputArchive,
   prepareOutputDir,
   requireModelSafeOutputDir,
   resolveCodexCommand,
@@ -47,7 +53,6 @@ import {
   type PluginInstall,
   type ProcessEnvironment,
   validateOutputDir,
-  validatePreparedOutputDir,
 } from "./runtime.js";
 import {
   enclosingGitWorktreeRoot,
@@ -58,6 +63,7 @@ import {
   type NormalizedTarget,
   type ScanMode,
   type ScanTarget,
+  validatedGitEnvironment,
   validateMode,
 } from "./targets.js";
 
@@ -69,7 +75,7 @@ interface CodexThreadLike {
   ): Promise<{ events: AsyncGenerator<ScanEvent> }>;
 }
 
-export interface ScanEvent {
+interface ScanEvent {
   readonly type: string;
   readonly [key: string]: unknown;
 }
@@ -78,36 +84,49 @@ interface CodexClientLike {
   startThread(options: {
     workingDirectory: string;
     skipGitRepoCheck: boolean;
-    sandboxMode: "workspace-write";
     approvalPolicy: "never";
   }): CodexThreadLike;
 }
 
 interface PreparedRuntime {
   codexHome: string;
+  bootstrapWorkspace?: string;
+  configPath?: string;
   plugin: PluginInstall;
   environment: Record<string, string>;
   credentialsAvailable: boolean;
-}
-
-interface InFlightPreparation {
-  controller: AbortController;
-  settled: Promise<void>;
 }
 
 export interface ScanOptions {
   target?: ScanTarget;
   mode?: ScanMode;
   outputDir?: string;
+  archiveExisting?: boolean;
+  onOutputArchived?: (archiveDir: string) => void;
   onOutputDirReady?: (scanDir: string) => void;
+  onScanStarted?: () => void;
+  onReconnect?: (attempt: number, maxAttempts: number) => void;
+  onWorkerStatus?: (status: ScanWorkerStatus) => void;
   signal?: AbortSignal;
+}
+
+export interface ScanPreflight {
+  repository: string;
+  target: NormalizedTarget;
+  mode: ScanMode;
+  outputDir: string | null;
+  archiveDir?: string;
+}
+
+interface LocalScanInputs extends ScanPreflight {
+  protectedRoot: string;
 }
 
 export interface CodexSecurityMetadata {
   sdk: "@openai/codex-sdk";
-  sdkVersion: "0.142.0";
+  sdkVersion: "0.144.6";
   executable: "@openai/codex";
-  executableVersion: "0.142.0";
+  executableVersion: "0.144.6";
 }
 
 interface ClientDependencies {
@@ -128,23 +147,23 @@ const DEFAULT_DEPENDENCIES: ClientDependencies = {
   environment: process.env,
 };
 
+const SCAN_PERMISSION_PROFILE = "codex_security_scan";
+
 export class CodexSecurity {
   public readonly config: Readonly<CodexSecurityConfig>;
   public readonly metadata: CodexSecurityMetadata = {
     sdk: "@openai/codex-sdk",
-    sdkVersion: "0.142.0",
+    sdkVersion: "0.144.6",
     executable: "@openai/codex",
-    executableVersion: "0.142.0",
+    executableVersion: "0.144.6",
   };
 
   readonly #dependencies: ClientDependencies;
-  readonly #handles = new Set<ScanHandle>();
   readonly #loginHandles = new Set<CodexLoginHandle>();
-  readonly #preparations = new Set<InFlightPreparation>();
+  readonly #abortController = new AbortController();
+  #activeOperation: Promise<unknown> | null = null;
   #runtimePromise: Promise<PreparedRuntime> | null = null;
-  #runtimeAbortController: AbortController | null = null;
   #runtime: PreparedRuntime | null = null;
-  #preferFileCredentials = false;
   #closed = false;
   #closePromise: Promise<void> | null = null;
 
@@ -161,138 +180,90 @@ export class CodexSecurity {
     repository: string,
     options: ScanOptions = {},
   ): Promise<ScanResult> {
-    return await (await this.#turn(repository, options, false)).run();
+    return await this.#trackOperation(() => this.#run(repository, options));
   }
 
-  public async turn(
+  public async preflight(
     repository: string,
     options: ScanOptions = {},
-  ): Promise<ScanHandle> {
-    return await this.#turn(repository, options, true);
+  ): Promise<ScanPreflight> {
+    this.#requireOpen();
+    const inputs = await this.#validateLocalInputs(
+      repository,
+      options,
+      options.signal,
+    );
+    requireOutputOutsideRepository(
+      inputs.protectedRoot,
+      await realpath(tmpdir()),
+      "temporary",
+    );
+    await mergedCodexConfig(this.config);
+    const archiveDir =
+      options.archiveExisting === true
+        ? await planOutputArchive(inputs.outputDir)
+        : null;
+    this.#requireOpen();
+    return {
+      repository: inputs.repository,
+      target: inputs.target,
+      mode: inputs.mode,
+      outputDir: inputs.outputDir,
+      ...(archiveDir === null ? {} : { archiveDir }),
+    };
   }
 
-  async #turn(
-    repository: string,
-    options: ScanOptions,
-    replayEvents: boolean,
-  ): Promise<ScanHandle> {
+  async #run(repository: string, options: ScanOptions): Promise<ScanResult> {
     this.#requireOpen();
-    const controller = new AbortController();
-    const removeExternalAbort = forwardAbort(options.signal, controller);
-    let markPreparationSettled!: () => void;
-    const preparation: InFlightPreparation = {
-      controller,
-      settled: new Promise<void>((resolve) => {
-        markPreparationSettled = resolve;
-      }),
-    };
-    this.#preparations.add(preparation);
+    const signal =
+      options.signal === undefined
+        ? this.#abortController.signal
+        : AbortSignal.any([this.#abortController.signal, options.signal]);
     let scanDir = "";
-    let handedOff = false;
     let targetPathsFile: string | null = null;
-    const target = options.target ?? "repository";
-    const mode = options.mode ?? "standard";
     try {
       const checkOpen = (): void => {
         this.#requireOpen();
-        throwIfAborted(controller.signal, scanDir);
+        throwIfAborted(signal, scanDir);
       };
 
       // Validate all local inputs before runtime initialization or plugin-Python discovery.
-      const repositoryPath = resolveRepositoryPath(repository);
-      const repo = await normalizeRepository(repositoryPath, controller.signal);
+      const {
+        repository: repo,
+        target: normalized,
+        mode,
+        outputDir: requestedOutput,
+        protectedRoot,
+      } = await this.#validateLocalInputs(repository, options, signal);
       checkOpen();
-      const normalized = await normalizeTarget(repo, target, controller.signal);
-      checkOpen();
-      validateMode(normalized, mode);
-      const targetMetadata =
-        normalized.kind === "paths"
-          ? await Promise.all(
-              normalized.paths.map((path) => lstat(join(repo, path))),
-            )
-          : [];
-      const protectedRoot =
-        (await enclosingGitWorktreeRoot(repo, controller.signal)) ?? repo;
-      const repositoryMetadata = await lstat(repo);
-      const protectedRootMetadata = await lstat(protectedRoot);
-      const requireUnchangedRepository = async (): Promise<void> => {
-        const currentRepository = await normalizeRepository(
-          repositoryPath,
-          controller.signal,
-        );
-        const currentMetadata = await lstat(currentRepository);
-        const currentProtectedRoot =
-          (await enclosingGitWorktreeRoot(
-            currentRepository,
-            controller.signal,
-          )) ?? currentRepository;
-        const currentProtectedRootMetadata = await lstat(currentProtectedRoot);
-        if (
-          currentRepository !== repo ||
-          currentMetadata.dev !== repositoryMetadata.dev ||
-          currentMetadata.ino !== repositoryMetadata.ino ||
-          currentProtectedRoot !== protectedRoot ||
-          currentProtectedRootMetadata.dev !== protectedRootMetadata.dev ||
-          currentProtectedRootMetadata.ino !== protectedRootMetadata.ino
-        ) {
-          throw new InvalidTargetError(
-            `Repository changed during scan preparation: ${repo}`,
-          );
-        }
-      };
-      const requestedOutput = await validateOutputDir(options.outputDir);
       let temporaryRoot: string | undefined;
       if (requestedOutput === null || this.#runtime === null) {
         temporaryRoot = await realpath(tmpdir());
-        requireOutputOutsideRepository(protectedRoot, temporaryRoot);
+        requireOutputOutsideRepository(
+          protectedRoot,
+          temporaryRoot,
+          "temporary",
+        );
       }
       if (requestedOutput !== null) {
         requireOutputOutsideRepository(protectedRoot, requestedOutput);
       }
       checkOpen();
 
-      const runtime = await this.#ensureRuntime(
-        controller.signal,
-        temporaryRoot,
-        (path) => requireOutputOutsideRepository(protectedRoot, path),
+      const runtime = await this.#ensureRuntime(signal, temporaryRoot, (path) =>
+        requireOutputOutsideRepository(protectedRoot, path, "runtime"),
       );
       const runtimeHome = await realpath(runtime.codexHome);
-      requireOutputOutsideRepository(protectedRoot, runtimeHome);
-      const runtimeHomeMetadata = await lstat(runtimeHome);
-      const requireUnchangedRuntimeHome = async (): Promise<void> => {
-        try {
-          const currentHome = await realpath(runtime.codexHome);
-          requireOutputOutsideRepository(protectedRoot, currentHome);
-          const currentMetadata = await lstat(currentHome);
-          if (
-            currentHome !== runtimeHome ||
-            currentMetadata.dev !== runtimeHomeMetadata.dev ||
-            currentMetadata.ino !== runtimeHomeMetadata.ino
-          ) {
-            throw new OutputDirectoryError(
-              `Codex runtime directory changed during scan preparation: ${runtime.codexHome}`,
-            );
-          }
-        } catch (error) {
-          if (error instanceof OutputDirectoryError) throw error;
-          throw new OutputDirectoryError(
-            `Unable to inspect Codex runtime directory: ${runtime.codexHome}`,
-            { cause: error },
-          );
-        }
-      };
+      requireOutputOutsideRepository(protectedRoot, runtimeHome, "runtime");
       checkOpen();
-      const apiKey = this.#preferFileCredentials
-        ? null
-        : environmentApiKey(this.#dependencies.environment);
+      const apiKey = environmentApiKey(this.#dependencies.environment);
       if (apiKey !== null) {
         const codexCommand = this.#codexCommand();
-        await requireUnchangedRuntimeHome();
         const login = await persistApiKey(
           codexCommand,
           withoutApiKeys(runtime.environment),
           apiKey,
-          controller.signal,
+          signal,
         );
         if (!login.success) {
           throw new CodexSecurityError(
@@ -300,12 +271,12 @@ export class CodexSecurity {
           );
         }
         runtime.credentialsAvailable = true;
-        this.#preferFileCredentials = true;
       }
       if (!runtime.credentialsAvailable) {
         throw new AuthenticationRequiredError(
-          "The isolated Codex home has no reusable authentication. Set OPENAI_API_KEY or " +
-            "CODEX_API_KEY, call a login method, or use file-backed Codex authentication.",
+          "No credentials were found. Run 'codex-security login', use " +
+            "'codex-security login --device-auth' on a remote or headless machine, or set " +
+            "OPENAI_API_KEY or CODEX_API_KEY for CI.",
         );
       }
       const python = await (
@@ -313,67 +284,72 @@ export class CodexSecurity {
       )({
         configuredPath: this.config.pythonPath,
         environment: withoutApiKeys(this.#dependencies.environment),
-        signal: controller.signal,
+        protectedRoot,
+        signal,
       });
       checkOpen();
-      await requireUnchangedRepository();
       scanDir = await (this.#dependencies.prepareOutputDir ?? prepareOutputDir)(
         requestedOutput ?? undefined,
         basename(repo),
         temporaryRoot,
         (path) => requireOutputOutsideRepository(protectedRoot, path),
+        options.archiveExisting,
+        options.onOutputArchived,
       );
       requireOutputOutsideRepository(protectedRoot, scanDir);
       requireModelSafeOutputDir(scanDir);
-      const scanDirMetadata = await lstat(scanDir);
       options.onOutputDirReady?.(scanDir);
       checkOpen();
 
+      const shellPluginRoot = runtime.plugin.pluginRoot;
+      const canonicalShellPluginRoot = await realpath(shellPluginRoot);
+      const pluginRelativeToHome = relative(
+        runtimeHome,
+        canonicalShellPluginRoot,
+      );
+      if (
+        pluginRelativeToHome === "" ||
+        (!pluginRelativeToHome.startsWith(`..${sep}`) &&
+          pluginRelativeToHome !== ".." &&
+          !isAbsolute(pluginRelativeToHome))
+      ) {
+        throw new OutputDirectoryError(
+          `Shell-visible plugin root must be outside CODEX_HOME: ${canonicalShellPluginRoot}`,
+        );
+      }
       const prompt = await scanPrompt(
-        runtime.plugin.installedRoot,
+        shellPluginRoot,
         normalized,
         mode,
+        runtime.configPath !== undefined,
       );
       checkOpen();
       const expectation: ScanExpectation = {
         repository: repo,
         repositoryRevision: await (
           this.#dependencies.repositoryRevision ?? repositoryRevision
-        )(repo, controller.signal),
+        )(repo, signal),
         target: normalized,
         mode,
         pluginVersion: runtime.plugin.version,
       };
       checkOpen();
-      await requireUnchangedRepository();
-      const validateScanOutput = async (): Promise<void> => {
-        try {
-          await validatePreparedOutputDir(
-            scanDir,
-            (path) => requireOutputOutsideRepository(protectedRoot, path),
-            scanDirMetadata,
-          );
-        } catch (error) {
-          if (error instanceof OutputDirectoryError) throw error;
-          throw new OutputDirectoryError(
-            `Scan output directory changed during preparation: ${scanDir}`,
-            { cause: error },
-          );
-        }
-      };
-      await validateScanOutput();
-      checkOpen();
 
       targetPathsFile =
         normalized.kind === "paths"
-          ? join(runtime.codexHome, `target-paths-${randomUUID()}.json`)
+          ? join(
+              dirname(runtime.codexHome),
+              `codex-security-target-paths-${randomUUID()}.json`,
+            )
           : null;
       const runtimePaths = {
         PYTHON: python,
-        CODEX_HOME: runtime.codexHome,
         CODEX_SECURITY_REPOSITORY: repo,
         CODEX_SECURITY_SCAN_DIR: scanDir,
-        CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.installedRoot,
+        CODEX_SECURITY_PLUGIN_ROOT: shellPluginRoot,
+        ...(runtime.configPath === undefined
+          ? {}
+          : { CODEX_SECURITY_CONFIG_PATH: runtime.configPath }),
         ...(targetPathsFile === null
           ? {}
           : { CODEX_SECURITY_TARGET_PATHS_FILE: targetPathsFile }),
@@ -401,18 +377,16 @@ export class CodexSecurity {
       const environment = {
         ...pluginExecutionEnvironment(
           python,
-          withoutApiKeys(runtime.environment),
+          withoutCodexHome(withoutApiKeys(runtime.environment)),
         ),
+        CODEX_HOME: runtime.codexHome,
         ...runtimePaths,
       };
       const codex = this.#dependencies.createCodex({
         env: definedEnvironment(environment),
         config: {
-          sandbox_workspace_write: {
-            writable_roots: [scanDir],
-            exclude_tmpdir_env_var: true,
-            exclude_slash_tmp: true,
-          },
+          default_permissions: SCAN_PERMISSION_PROFILE,
+          allow_login_shell: false,
           shell_environment_policy: shellEnvironmentPolicy(
             this.config.codexOverrides?.["shell_environment_policy"],
             runtimePaths,
@@ -425,39 +399,8 @@ export class CodexSecurity {
       const thread = codex.startThread({
         workingDirectory: scanDir,
         skipGitRepoCheck: true,
-        sandboxMode: "workspace-write",
         approvalPolicy: "never",
       });
-      await requireUnchangedRepository();
-      if (normalized.kind === "paths") {
-        const currentTarget = await normalizeTarget(
-          repo,
-          normalized.paths,
-          controller.signal,
-        );
-        const currentTargetMetadata =
-          currentTarget.kind === "paths"
-            ? await Promise.all(
-                currentTarget.paths.map((path) => lstat(join(repo, path))),
-              )
-            : [];
-        if (
-          currentTarget.kind !== "paths" ||
-          currentTarget.paths.length !== normalized.paths.length ||
-          currentTarget.paths.some(
-            (path, index) => path !== normalized.paths[index],
-          ) ||
-          currentTargetMetadata.some(
-            (metadata, index) =>
-              metadata.dev !== targetMetadata[index]?.dev ||
-              metadata.ino !== targetMetadata[index]?.ino,
-          )
-        ) {
-          throw new InvalidTargetError(
-            `Path target changed during scan preparation: ${repo}`,
-          );
-        }
-      }
       const serializedPaths =
         normalized.kind === "paths"
           ? JSON.stringify(normalized.paths)
@@ -465,66 +408,40 @@ export class CodexSecurity {
               .replaceAll("\u2028", "\\u2028")
               .replaceAll("\u2029", "\\u2029")
           : null;
-      await requireUnchangedRuntimeHome();
-      await validateScanOutput();
       checkOpen();
       if (serializedPaths !== null && targetPathsFile !== null) {
         await writeFile(targetPathsFile, `${serializedPaths}\n`, {
           flag: "wx",
           mode: 0o400,
-          signal: controller.signal,
+          signal,
         });
         await chmod(targetPathsFile, 0o400);
-        checkOpen();
       }
-      await requireUnchangedRuntimeHome();
-      await validateScanOutput();
       checkOpen();
       const { events } = await thread.runStreamed(prompt, {
-        signal: controller.signal,
+        signal,
       });
       checkOpen();
 
-      let handle: ScanHandle;
-      handle = new ScanHandle({
+      return await runScanEvents({
         thread,
         events,
-        abortController: controller,
+        signal,
         scanDir,
         pluginRoot: runtime.plugin.installedRoot,
         expectation,
-        replayEvents,
-        onSettled: async () => {
-          try {
-            await removeTargetPathsFile(targetPathsFile);
-          } finally {
-            removeExternalAbort();
-            this.#handles.delete(handle);
-          }
-        },
+        onScanStarted: options.onScanStarted,
+        onReconnect: options.onReconnect,
+        onWorkerStatus: options.onWorkerStatus,
       });
-      this.#handles.add(handle);
-      handedOff = true;
-      return handle;
     } catch (error) {
       if (this.#closed) this.#requireOpen();
-      if (
-        controller.signal.aborted &&
-        !(error instanceof ScanInterruptedError)
-      ) {
-        throwIfAborted(controller.signal, scanDir);
+      if (signal.aborted && !(error instanceof ScanInterruptedError)) {
+        throwIfAborted(signal, scanDir);
       }
       throw error;
     } finally {
-      this.#preparations.delete(preparation);
-      try {
-        if (!handedOff) {
-          await removeTargetPathsFile(targetPathsFile);
-        }
-      } finally {
-        if (!handedOff) removeExternalAbort();
-        markPreparationSettled();
-      }
+      await removeTargetPathsFile(targetPathsFile);
     }
   }
 
@@ -545,7 +462,6 @@ export class CodexSecurity {
         `Codex API-key login failed: ${result.stderr.trim() || result.stdout.trim() || "unknown error"}`,
       );
     }
-    this.#preferFileCredentials = true;
     runtime.credentialsAvailable = true;
   }
 
@@ -558,7 +474,6 @@ export class CodexSecurity {
         ["login"],
         runtime.environment,
         () => {
-          this.#preferFileCredentials = true;
           runtime.credentialsAvailable = true;
         },
       ),
@@ -577,7 +492,6 @@ export class CodexSecurity {
         ["login", "--device-auth"],
         runtime.environment,
         () => {
-          this.#preferFileCredentials = true;
           runtime.credentialsAvailable = true;
         },
       ),
@@ -587,19 +501,10 @@ export class CodexSecurity {
     return handle;
   }
 
-  public async account(
-    options: { refreshToken?: boolean } = {},
-  ): Promise<AccountStatus> {
+  public async account(): Promise<AccountStatus> {
     return await this.#runOperation(async (runtime, signal) => {
-      const apiKey = this.#preferFileCredentials
-        ? null
-        : environmentApiKey(this.#dependencies.environment);
+      const apiKey = environmentApiKey(this.#dependencies.environment);
       if (apiKey !== null) {
-        if (options.refreshToken === true) {
-          throw new UnsupportedCodexSdkCapabilityError(
-            "API-key authentication does not provide a refresh token.",
-          );
-        }
         return {
           authenticated: true,
           details: "Authenticated with an API key.",
@@ -608,7 +513,6 @@ export class CodexSecurity {
       return await accountStatus(
         this.#codexCommand(),
         runtime.environment,
-        options,
         signal,
       );
     });
@@ -625,7 +529,6 @@ export class CodexSecurity {
         return preparedRuntime;
       },
     );
-    this.#preferFileCredentials = false;
     runtime.credentialsAvailable = false;
   }
 
@@ -637,29 +540,30 @@ export class CodexSecurity {
   }
 
   async #finishClose(): Promise<void> {
-    this.#runtimeAbortController?.abort();
-    const preparations = [...this.#preparations];
-    for (const preparation of preparations) preparation.controller.abort();
+    this.#abortController.abort();
     const loginHandles = [...this.#loginHandles];
     for (const handle of loginHandles) handle.cancel();
-    for (const handle of this.#handles) handle.interrupt();
     await Promise.allSettled(
-      preparations.map(async (preparation) => await preparation.settled),
-    );
-    await Promise.allSettled(
-      loginHandles.map(async (handle) => await handle.wait()),
-    );
-    for (const handle of this.#handles) handle.interrupt();
-    await Promise.allSettled(
-      [...this.#handles].map(async (handle) => await handle.settled()),
+      [
+        this.#activeOperation,
+        ...loginHandles.map((handle) => handle.wait()),
+      ].filter(
+        (operation): operation is Promise<unknown> => operation !== null,
+      ),
     );
     const runtime =
       this.#runtime ?? (await this.#runtimePromise?.catch(() => null));
     this.#runtime = null;
     this.#runtimePromise = null;
-    this.#runtimeAbortController = null;
     if (runtime !== null && runtime !== undefined) {
-      await cleanupSdkDirectory(runtime.codexHome);
+      const cleanupResults = await Promise.allSettled(
+        [runtime.codexHome, runtime.bootstrapWorkspace]
+          .filter((path): path is string => path !== undefined)
+          .map((path) => cleanupSdkDirectory(path)),
+      );
+      for (const result of cleanupResults) {
+        if (result.status === "rejected") throw result.reason;
+      }
     }
   }
 
@@ -670,25 +574,31 @@ export class CodexSecurity {
   async #runOperation<T>(
     operation: (runtime: PreparedRuntime, signal: AbortSignal) => Promise<T>,
   ): Promise<T> {
-    this.#requireOpen();
-    const controller = new AbortController();
-    let markSettled!: () => void;
-    const preparation: InFlightPreparation = {
-      controller,
-      settled: new Promise<void>((resolve) => {
-        markSettled = resolve;
-      }),
-    };
-    this.#preparations.add(preparation);
-    try {
-      const runtime = await this.#ensureRuntime(controller.signal);
+    return await this.#trackOperation(async () => {
+      const signal = this.#abortController.signal;
+      const runtime = await this.#ensureRuntime(signal);
       this.#requireOpen();
-      const result = await operation(runtime, controller.signal);
+      const result = await operation(runtime, signal);
       this.#requireOpen();
       return result;
+    });
+  }
+
+  async #trackOperation<T>(operation: () => Promise<T>): Promise<T> {
+    this.#requireOpen();
+    if (this.#activeOperation !== null) {
+      throw new CodexSecurityError(
+        "A Codex Security operation is already in progress.",
+      );
+    }
+    const activeOperation = operation();
+    this.#activeOperation = activeOperation;
+    try {
+      return await activeOperation;
     } finally {
-      this.#preparations.delete(preparation);
-      markSettled();
+      if (this.#activeOperation === activeOperation) {
+        this.#activeOperation = null;
+      }
     }
   }
 
@@ -700,9 +610,8 @@ export class CodexSecurity {
     this.#requireOpen();
     if (this.#runtime !== null) return this.#runtime;
     if (this.#runtimePromise === null) {
-      this.#runtimeAbortController = new AbortController();
       const runtimePromise = this.#prepareRuntime(
-        this.#runtimeAbortController.signal,
+        signal ?? this.#abortController.signal,
         temporaryRoot,
         validateLocation,
       );
@@ -710,11 +619,10 @@ export class CodexSecurity {
       void runtimePromise.catch(() => {
         if (this.#runtimePromise === runtimePromise) {
           this.#runtimePromise = null;
-          this.#runtimeAbortController = null;
         }
       });
     }
-    const runtime = await waitForPromise(this.#runtimePromise, signal);
+    const runtime = await this.#runtimePromise;
     this.#requireOpen();
     this.#runtime = runtime;
     return this.#runtime;
@@ -733,6 +641,38 @@ export class CodexSecurity {
     return (this.#dependencies.resolveCodexCommand ?? resolveCodexCommand)();
   }
 
+  async #validateLocalInputs(
+    repository: string,
+    options: ScanOptions,
+    signal?: AbortSignal,
+  ): Promise<LocalScanInputs> {
+    const repositoryPath = resolveRepositoryPath(repository);
+    const repo = await normalizeRepository(repositoryPath, signal);
+    throwIfAborted(signal);
+    const requestedTarget = options.target ?? "repository";
+    validatedGitEnvironment(this.#dependencies.environment);
+    const normalized = await normalizeTarget(repo, requestedTarget, signal);
+    throwIfAborted(signal);
+    const mode = options.mode ?? "standard";
+    validateMode(normalized, mode);
+    const protectedRoot =
+      (await enclosingGitWorktreeRoot(repo, signal)) ?? repo;
+    const requestedOutput = await validateOutputDir(
+      options.outputDir,
+      options.archiveExisting,
+    );
+    if (requestedOutput !== null) {
+      requireOutputOutsideRepository(protectedRoot, requestedOutput);
+    }
+    return {
+      repository: repo,
+      target: normalized,
+      mode,
+      outputDir: requestedOutput,
+      protectedRoot,
+    };
+  }
+
   async #prepareRuntime(
     signal: AbortSignal,
     temporaryRoot?: string,
@@ -742,27 +682,38 @@ export class CodexSecurity {
       return await this.#dependencies.prepareRuntime(this.config, signal);
     }
     const codexHome = await createIsolatedHome(temporaryRoot, validateLocation);
+    let bootstrapWorkspace: string | undefined;
     try {
       throwIfAborted(signal);
-      const workspace = join(codexHome, "bootstrap");
-      await mkdir(workspace, { recursive: true, mode: 0o700 });
+      bootstrapWorkspace = await createIsolatedHome(
+        dirname(codexHome),
+        validateLocation,
+      );
       const pluginRoot = await resolvePluginPath(
         this.config.pluginPath,
-        workspace,
+        bootstrapWorkspace,
         signal,
       );
+      const processEnvironment = this.#dependencies.environment;
+      const nodeAmbientHome = join(homedir(), ".codex");
+      const configuredAmbientHome = environmentValue(
+        processEnvironment,
+        "CODEX_HOME",
+      );
+      const ambientHome = configuredAmbientHome ?? nodeAmbientHome;
+      const mergedConfig = await mergedCodexConfig(this.config);
+      const codexConfig = scanRuntimeCodexConfig(mergedConfig);
+      await writeCodexConfig(join(codexHome, "config.toml"), codexConfig);
+      const configPath = join(bootstrapWorkspace, "config-preflight.toml");
       await writeCodexConfig(
-        join(codexHome, "config.toml"),
-        await mergedCodexConfig(this.config, { pluginRoot }),
+        configPath,
+        scanPreflightCodexConfig(mergedConfig),
       );
       throwIfAborted(signal);
-      const processEnvironment = this.#dependencies.environment;
       const plugin = await bootstrapPlugin(codexHome, pluginRoot, {
-        environment: processEnvironment,
+        environment: withoutCodexHome(processEnvironment),
         signal,
       });
-      const ambientHome =
-        processEnvironment["CODEX_HOME"] ?? join(homedir(), ".codex");
       const credentialsAvailable = await initialCredentialsAvailable(
         processEnvironment,
         ambientHome,
@@ -770,15 +721,31 @@ export class CodexSecurity {
       );
       return {
         codexHome,
+        bootstrapWorkspace,
+        configPath,
         plugin,
         environment: {
-          ...withoutApiKeys(processEnvironment),
+          ...withoutCodexHome(withoutApiKeys(processEnvironment)),
           CODEX_HOME: codexHome,
         },
         credentialsAvailable,
       };
     } catch (error) {
-      await cleanupSdkDirectory(codexHome);
+      const cleanupResults = await Promise.allSettled(
+        [bootstrapWorkspace, codexHome]
+          .filter((path): path is string => path !== undefined)
+          .map((path) => cleanupSdkDirectory(path)),
+      );
+      const cleanupFailures = cleanupResults.flatMap((result) =>
+        result.status === "rejected" ? [result.reason] : [],
+      );
+      if (cleanupFailures.length > 0) {
+        throw new AggregateError(
+          [error, ...cleanupFailures],
+          "Codex Security runtime preparation failed and its isolated runtime could not be cleaned up.",
+          { cause: error },
+        );
+      }
       throw error;
     }
   }
@@ -809,160 +776,106 @@ async function removeTargetPathsFile(path: string | null): Promise<void> {
   }
 }
 
-interface ScanHandleOptions {
+interface ScanEventRunOptions {
   thread: CodexThreadLike;
   events: AsyncGenerator<ScanEvent>;
-  abortController: AbortController;
+  signal: AbortSignal;
   scanDir: string;
   pluginRoot: string;
   expectation: ScanExpectation;
-  replayEvents?: boolean;
-  onSettled: () => void | Promise<void>;
+  onScanStarted?: () => void;
+  onReconnect?: (attempt: number, maxAttempts: number) => void;
+  onWorkerStatus?: (status: ScanWorkerStatus) => void;
 }
 
-export class ScanHandle {
-  public readonly scanDir: string;
-  readonly #thread: CodexThreadLike;
-  readonly #abortController: AbortController;
-  readonly #eventLog: EventLog<ScanEvent>;
-  readonly #completion: Promise<ScanResult>;
-  #threadId: string | null;
-  #status = "in_progress";
-  #finalResponse = "";
-  #usage: unknown = null;
-
-  public constructor(options: ScanHandleOptions) {
-    this.scanDir = options.scanDir;
-    this.#thread = options.thread;
-    this.#threadId = options.thread.id;
-    this.#abortController = options.abortController;
-    this.#eventLog = new EventLog(options.replayEvents ?? true);
-    this.#completion = this.#pump(options);
-    void this.#completion.catch(() => undefined);
-  }
-
-  public get id(): null {
-    return null;
-  }
-
-  public get threadId(): string | null {
-    return this.#threadId ?? this.#thread.id;
-  }
-
-  public stream(): AsyncIterable<ScanEvent> {
-    return this.#eventLog.iterate();
-  }
-
-  public async run(): Promise<ScanResult> {
-    return await this.#completion;
-  }
-
-  public interrupt(): void {
-    this.#abortController.abort();
-  }
-
-  public async steer(_input: string): Promise<never> {
-    throw new UnsupportedCodexSdkCapabilityError(
-      "Active-turn steering is not exposed by @openai/codex-sdk@0.142.0. " +
-        "The scan continues unchanged; no private transport was used.",
-    );
-  }
-
-  public async settled(): Promise<void> {
-    await this.#completion.then(
-      () => undefined,
-      () => undefined,
-    );
-  }
-
-  async #pump(options: ScanHandleOptions): Promise<ScanResult> {
-    try {
-      for await (const event of options.events) {
-        this.#eventLog.push(event);
-        if (event.type === "thread.started") {
-          const threadId = event["thread_id"];
-          if (typeof threadId === "string") this.#threadId = threadId;
-        } else if (
-          event.type === "item.completed" &&
-          isRecord(event["item"]) &&
-          event["item"]["type"] === "agent_message" &&
-          typeof event["item"]["text"] === "string"
-        ) {
-          this.#finalResponse = event["item"]["text"];
-        } else if (event.type === "turn.completed") {
-          this.#status = "completed";
-          this.#usage = event["usage"];
-        } else if (
-          event.type === "turn.failed" &&
-          isRecord(event["error"]) &&
-          typeof event["error"]["message"] === "string"
-        ) {
-          this.#status = "failed";
-          throw new CodexSecurityError(event["error"]["message"]);
-        } else if (
-          event.type === "error" &&
-          typeof event["message"] === "string"
-        ) {
-          this.#status = "failed";
-          throw new CodexSecurityError(event["message"]);
+export async function runScanEvents(
+  options: ScanEventRunOptions,
+): Promise<ScanResult> {
+  let threadId = options.thread.id;
+  let scanStarted = false;
+  let status = "in_progress";
+  let finalResponse = "";
+  let usage: unknown = null;
+  let lastStreamError: string | null = null;
+  try {
+    for await (const event of options.events) {
+      const workerStatus = workerStatusFromEvent(event);
+      if (workerStatus !== null) options.onWorkerStatus?.(workerStatus);
+      if (event.type === "thread.started") {
+        const startedThreadId = event["thread_id"];
+        if (typeof startedThreadId === "string") threadId = startedThreadId;
+        if (!scanStarted) {
+          scanStarted = true;
+          options.onScanStarted?.();
         }
-      }
-      if (this.#abortController.signal.aborted) {
-        this.#status = "interrupted";
-        throw new ScanInterruptedError(
-          `Codex Security scan was interrupted; partial output remains at ${this.scanDir}.`,
-          this.scanDir,
-        );
-      }
-      if (this.#status !== "completed") {
-        throw new IncompleteScanError(
-          "Codex Security event stream ended before the turn completed.",
-        );
-      }
-      const threadId = this.threadId;
-      if (threadId === null) {
-        throw new IncompleteScanError(
-          "Codex Security did not report a thread ID.",
-        );
-      }
-      const turnResult: TurnResultMetadata = {
-        status: this.#status,
-        finalResponse: this.#finalResponse,
-        usage: this.#usage,
-      };
-      const result = await collectResult(
-        turnResult,
-        threadId,
-        this.scanDir,
-        options.pluginRoot,
-        options.expectation,
-        this.#abortController.signal,
-      );
-      if (this.#abortController.signal.aborted) {
-        this.#status = "interrupted";
-        throw new ScanInterruptedError(
-          `Codex Security scan was interrupted; partial output remains at ${this.scanDir}.`,
-          this.scanDir,
-        );
-      }
-      this.#eventLog.finish();
-      return result;
-    } catch (error) {
-      if (
-        this.#abortController.signal.aborted &&
-        !(error instanceof ScanInterruptedError)
+      } else if (
+        event.type === "item.completed" &&
+        isRecord(event["item"]) &&
+        event["item"]["type"] === "agent_message" &&
+        typeof event["item"]["text"] === "string"
       ) {
-        error = new ScanInterruptedError(
-          `Codex Security scan was interrupted; partial output remains at ${this.scanDir}.`,
-          this.scanDir,
-          { cause: error },
-        );
+        finalResponse = event["item"]["text"];
+      } else if (event.type === "turn.completed") {
+        status = "completed";
+        usage = event["usage"];
+      } else if (
+        event.type === "turn.failed" &&
+        isRecord(event["error"]) &&
+        typeof event["error"]["message"] === "string"
+      ) {
+        throw new CodexSecurityError(event["error"]["message"]);
+      } else if (
+        event.type === "error" &&
+        typeof event["message"] === "string"
+      ) {
+        const message = event["message"];
+        const reconnect = reconnectAttempt(message);
+        if (reconnect === null) throw new CodexSecurityError(message);
+        lastStreamError = message;
+        options.onReconnect?.(...reconnect);
       }
-      this.#eventLog.finish(error);
-      throw error;
-    } finally {
-      await options.onSettled();
     }
+    if (options.signal.aborted) {
+      throw new ScanInterruptedError(
+        `Codex Security scan was interrupted; partial output remains at ${options.scanDir}.`,
+        options.scanDir,
+      );
+    }
+    if (status !== "completed") {
+      throw new IncompleteScanError(
+        lastStreamError ??
+          "Codex Security event stream ended before the turn completed.",
+      );
+    }
+    if (threadId === null) {
+      throw new IncompleteScanError(
+        "Codex Security did not report a thread ID.",
+      );
+    }
+    const result = await collectResult(
+      { status, finalResponse, usage },
+      threadId,
+      options.scanDir,
+      options.pluginRoot,
+      options.expectation,
+      options.signal,
+    );
+    if (options.signal.aborted) {
+      throw new ScanInterruptedError(
+        `Codex Security scan was interrupted; partial output remains at ${options.scanDir}.`,
+        options.scanDir,
+      );
+    }
+    return result;
+  } catch (error) {
+    if (options.signal.aborted && !(error instanceof ScanInterruptedError)) {
+      throw new ScanInterruptedError(
+        `Codex Security scan was interrupted; partial output remains at ${options.scanDir}.`,
+        options.scanDir,
+        { cause: error },
+      );
+    }
+    throw error;
   }
 }
 
@@ -970,6 +883,7 @@ async function scanPrompt(
   pluginRoot: string,
   target: NormalizedTarget,
   mode: ScanMode,
+  hasConfigPath = false,
 ): Promise<string> {
   const skillName = skillNameFor(target, mode);
   const skillPath = join(pluginRoot, "skills", skillName, "SKILL.md");
@@ -982,10 +896,20 @@ async function scanPrompt(
   return [
     `Use the installed $codex-security:${skillName} skill at "$CODEX_SECURITY_PLUGIN_ROOT/skills/${skillName}/SKILL.md".`,
     "Run this Codex Security scan non-interactively.",
+    ...(skillName === "deep-security-scan"
+      ? []
+      : [
+          "This exhaustive scan authorizes the delegated-worker phases required by the selected skill; use available subagent tools and continue with parent-agent fallback if capacity changes.",
+        ]),
     "This SDK host does not render MCP Apps; use the terminal/chat workflow.",
     'Use "$PYTHON" as <python_command> for every plugin helper; replace any literal python or python3 helper invocation with this exact interpreter.',
     'Repository root: "$CODEX_SECURITY_REPOSITORY"',
     'Use this exact scan directory for all scan output: "$CODEX_SECURITY_SCAN_DIR"',
+    ...(hasConfigPath
+      ? [
+          'For normal config-preflight helper calls, append --config "$CODEX_SECURITY_CONFIG_PATH" so preflight reads the sanitized active runtime config. Preserve the documented runtime and --effective-config arguments for session-only values.',
+        ]
+      : []),
     "Runtime paths are environment-backed; keep them quoted in POSIX shells and use the corresponding $env: names in PowerShell. Do not copy or reparse their values.",
     targetInstruction(target),
     "Complete and seal the canonical JSON contract before returning.",
@@ -1064,49 +988,13 @@ async function collectResult(
   });
 }
 
-class EventLog<T> {
-  readonly #items: T[] = [];
-  readonly #waiters = new Set<() => void>();
-  #finished = false;
-  #error: unknown;
-
-  public constructor(private readonly replay: boolean) {}
-
-  public push(item: T): void {
-    if (this.replay) this.#items.push(item);
-    this.#wake();
-  }
-
-  public finish(error?: unknown): void {
-    this.#error = error;
-    this.#finished = true;
-    this.#wake();
-  }
-
-  public async *iterate(): AsyncGenerator<T> {
-    let index = 0;
-    while (true) {
-      while (index < this.#items.length) {
-        yield this.#items[index++]!;
-      }
-      if (this.#finished) {
-        if (this.#error !== undefined) throw this.#error;
-        return;
-      }
-      await new Promise<void>((resolve) => this.#waiters.add(resolve));
-    }
-  }
-
-  #wake(): void {
-    for (const waiter of this.#waiters) waiter();
-    this.#waiters.clear();
-  }
-}
-
 function environmentApiKey(environment: ProcessEnvironment): string | null {
   for (const requested of ["OPENAI_API_KEY", "CODEX_API_KEY"]) {
+    const canonical = environment[requested]?.trim();
+    if (canonical) return canonical;
     for (const [name, value] of Object.entries(environment)) {
-      if (name.toUpperCase() === requested && value) return value;
+      if (name.toUpperCase() === requested && value?.trim())
+        return value.trim();
     }
   }
   return null;
@@ -1116,10 +1004,146 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function reconnectAttempt(message: string): [number, number] | null {
+  const match =
+    /^Reconnecting(?:\.\.\.|…)[ \t]+([1-9]\d{0,2})\/([1-9]\d{0,2})(?=[ \t(]|$)/u.exec(
+      message,
+    );
+  if (match === null) return null;
+  const attempt = Number(match[1]);
+  const maxAttempts = Number(match[2]);
+  return attempt <= maxAttempts ? [attempt, maxAttempts] : null;
+}
+
 function isCodexConfigObject(
   value: unknown,
 ): value is NonNullable<CodexOptions["config"]> {
   return isRecord(value);
+}
+
+export function scanRuntimeCodexConfig(config: JsonObject): JsonObject {
+  const hardened = structuredClone(config);
+  delete hardened["sandbox_mode"];
+  const configuredPermissions = isRecord(hardened["permissions"])
+    ? hardened["permissions"]
+    : {};
+  return {
+    ...hardened,
+    allow_login_shell: false,
+    default_permissions: SCAN_PERMISSION_PROFILE,
+    permissions: {
+      ...configuredPermissions,
+      [SCAN_PERMISSION_PROFILE]: {
+        filesystem: {
+          ":root": "read",
+          ":workspace_roots": "write",
+        },
+      },
+    },
+  };
+}
+
+export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
+  const safeString = (value: unknown, maxLength: number): value is string =>
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= maxLength &&
+    !/[\u0000-\u001f\u007f]/u.test(value) &&
+    !/(?:^|[^a-z0-9])(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|key|secret|token|env|mcp|set|password|passwd|credential|authorization|bearer)(?:[^a-z0-9]|$)/iu.test(
+      value,
+    );
+  const safeProfileName = (value: unknown): value is string =>
+    safeString(value, 128) && /^[A-Za-z0-9_-]+$/u.test(value);
+  const safeInteger = (value: unknown): value is number =>
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= 0 &&
+    value <= 1_000_000;
+  const capabilityFeatures = (value: unknown): JsonObject => {
+    if (!isRecord(value)) return {};
+    const result: JsonObject = {};
+    if (typeof value["goals"] === "boolean") {
+      result["goals"] = value["goals"];
+    }
+    const multiAgent = value["multi_agent_v2"];
+    if (typeof multiAgent === "boolean") {
+      result["multi_agent_v2"] = multiAgent;
+    } else if (isRecord(multiAgent)) {
+      const sanitized: JsonObject = {};
+      if (typeof multiAgent["enabled"] === "boolean") {
+        sanitized["enabled"] = multiAgent["enabled"];
+      }
+      const capacity = multiAgent["max_concurrent_threads_per_session"];
+      if (safeInteger(capacity)) {
+        sanitized["max_concurrent_threads_per_session"] = capacity;
+      }
+      if (Object.keys(sanitized).length > 0) {
+        result["multi_agent_v2"] = sanitized;
+      }
+    }
+    return result;
+  };
+
+  const result: JsonObject = {};
+  const features = capabilityFeatures(config["features"]);
+  if (Object.keys(features).length > 0) result["features"] = features;
+  const agents = config["agents"];
+  if (isRecord(agents)) {
+    const sanitized: JsonObject = {};
+    for (const key of ["max_threads", "max_depth"]) {
+      const value = agents[key];
+      if (safeInteger(value)) {
+        sanitized[key] = value;
+      }
+    }
+    if (Object.keys(sanitized).length > 0) result["agents"] = sanitized;
+  }
+  if (safeProfileName(config["profile"])) {
+    result["profile"] = config["profile"];
+  }
+  const profiles = config["profiles"];
+  if (isRecord(profiles)) {
+    const sanitized: JsonObject = {};
+    for (const [name, profile] of Object.entries(profiles).slice(0, 256)) {
+      if (!safeProfileName(name) || !isRecord(profile)) continue;
+      const profileFeatures = capabilityFeatures(profile["features"]);
+      if (Object.keys(profileFeatures).length > 0) {
+        sanitized[name] = { features: profileFeatures };
+      }
+    }
+    if (Object.keys(sanitized).length > 0) result["profiles"] = sanitized;
+  }
+  const rootMarkers = config["project_root_markers"];
+  if (Array.isArray(rootMarkers)) {
+    result["project_root_markers"] = rootMarkers
+      .filter((value): value is string => safeString(value, 256))
+      .slice(0, 64);
+  }
+  const projects = config["projects"];
+  if (isRecord(projects)) {
+    const sanitized: JsonObject = {};
+    for (const [path, project] of Object.entries(projects).slice(0, 256)) {
+      if (!safeString(path, 4096) || !isAbsolute(path) || !isRecord(project)) {
+        continue;
+      }
+      const trust = project["trust_level"];
+      if (trust !== "trusted" && trust !== "untrusted") continue;
+      sanitized[path] = { trust_level: trust };
+    }
+    if (Object.keys(sanitized).length > 0) result["projects"] = sanitized;
+  }
+  const multiagent = config["multiagent_config"];
+  if (isRecord(multiagent) && safeInteger(multiagent["max_concurrency"])) {
+    result["multiagent_config"] = {
+      max_concurrency: multiagent["max_concurrency"],
+    };
+  }
+  if (Buffer.byteLength(JSON.stringify(result), "utf8") > 256 * 1024) {
+    throw new CodexSecurityError(
+      "The sanitized Codex Security preflight config exceeds the size limit.",
+    );
+  }
+  return result;
 }
 
 function shellEnvironmentPolicy(
@@ -1131,63 +1155,82 @@ function shellEnvironmentPolicy(
     ? configured["set"]
     : {};
   const includeOnly = configured["include_only"];
+  const exclude = configured["exclude"];
   return {
     ...configured,
-    set: { ...configuredSet, ...runtimePaths },
-    ...(Array.isArray(includeOnly)
-      ? {
-          include_only: [
-            ...new Set([
-              ...includeOnly.filter(
-                (value): value is string => typeof value === "string",
-              ),
-              ...Object.keys(runtimePaths),
+    ignore_default_excludes: false,
+    exclude: [
+      ...new Set([
+        ...(Array.isArray(exclude)
+          ? exclude.filter(
+              (value): value is string => typeof value === "string",
+            )
+          : []),
+        "CODEX_HOME",
+        "*KEY*",
+        "*SECRET*",
+        "*TOKEN*",
+      ]),
+    ],
+    set: {
+      ...Object.fromEntries(
+        Object.entries(configuredSet).filter(([key]) =>
+          safeShellEnvironmentName(key),
+        ),
+      ),
+      ...runtimePaths,
+    },
+    include_only: [
+      ...new Set([
+        ...(Array.isArray(includeOnly)
+          ? includeOnly.filter(
+              (value): value is string =>
+                typeof value === "string" && safeShellEnvironmentPattern(value),
+            )
+          : [
+              "PATH",
+              "HOME",
+              "USER",
+              "USERPROFILE",
+              "HOMEDRIVE",
+              "HOMEPATH",
+              "TMP",
+              "TEMP",
+              "TMPDIR",
+              "SYSTEMROOT",
+              "WINDIR",
+              "COMSPEC",
+              "PATHEXT",
+              "LANG",
+              "LC_*",
             ]),
-          ],
-        }
-      : {}),
+        ...Object.keys(runtimePaths),
+      ]),
+    ],
   };
 }
 
-function forwardAbort(
-  source: AbortSignal | undefined,
-  destination: AbortController | null,
-): () => void {
-  if (source === undefined || destination === null) return () => undefined;
-  const abort = () => destination.abort(source.reason);
-  if (source.aborted) abort();
-  else source.addEventListener("abort", abort, { once: true });
-  return () => source.removeEventListener("abort", abort);
+function safeShellEnvironmentName(value: string): boolean {
+  const upper = value.toUpperCase();
+  return (
+    upper !== "CODEX_HOME" &&
+    !upper.includes("KEY") &&
+    !upper.includes("SECRET") &&
+    !upper.includes("TOKEN")
+  );
 }
 
-async function waitForPromise<T>(
-  promise: Promise<T>,
-  signal?: AbortSignal,
-): Promise<T> {
-  if (signal === undefined) return await promise;
-  if (signal.aborted) throw abortReason(signal);
-  return await new Promise<T>((resolve, reject) => {
-    const aborted = () => {
-      signal.removeEventListener("abort", aborted);
-      reject(abortReason(signal));
-    };
-    signal.addEventListener("abort", aborted, { once: true });
-    void promise.then(
-      (value) => {
-        signal.removeEventListener("abort", aborted);
-        resolve(value);
-      },
-      (error: unknown) => {
-        signal.removeEventListener("abort", aborted);
-        reject(error);
-      },
-    );
-  });
+function safeShellEnvironmentPattern(value: string): boolean {
+  return (
+    safeShellEnvironmentName(value) &&
+    (/^[A-Za-z_][A-Za-z0-9_]*$/.test(value) || value === "LC_*")
+  );
 }
 
 function requireOutputOutsideRepository(
   repository: string,
   outputDirectory: string,
+  pathKind: ProtectedScanPathKind = "output",
 ): void {
   const outputRelative = relative(repository, outputDirectory);
   if (
@@ -1196,17 +1239,12 @@ function requireOutputOutsideRepository(
       !outputRelative.startsWith(`..${sep}`) &&
       !isAbsolute(outputRelative))
   ) {
-    throw new OutputDirectoryError(
-      `Scan output directory must be outside the repository: ${outputDirectory}`,
+    throw new OutputInsideProtectedRootError(
+      outputDirectory,
+      repository,
+      pathKind,
     );
   }
-}
-
-function abortReason(signal: AbortSignal): unknown {
-  return (
-    signal.reason ??
-    new DOMException("The operation was aborted.", "AbortError")
-  );
 }
 
 function throwIfAborted(signal?: AbortSignal, scanDir = ""): void {
@@ -1237,4 +1275,33 @@ function withoutApiKeys(
         name.toUpperCase() !== "CODEX_API_KEY",
     ),
   );
+}
+
+function withoutCodexHome(
+  environment: ProcessEnvironment,
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(definedEnvironment(environment)).filter(
+      ([name]) => name.toUpperCase() !== "CODEX_HOME",
+    ),
+  );
+}
+
+export function environmentValue(
+  environment: ProcessEnvironment,
+  requested: string,
+): string | undefined {
+  const exact = environment[requested];
+  if (exact !== undefined && exact.trim() !== "") return exact;
+  const upper = requested.toUpperCase();
+  for (const [name, value] of Object.entries(environment)) {
+    if (
+      name.toUpperCase() === upper &&
+      value !== undefined &&
+      value.trim() !== ""
+    ) {
+      return value;
+    }
+  }
+  return undefined;
 }

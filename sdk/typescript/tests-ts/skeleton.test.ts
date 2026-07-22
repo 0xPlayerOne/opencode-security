@@ -8,7 +8,7 @@ import type {
   ScanHardening,
   ScanRecord,
 } from "../src/index.js";
-import { main, rootHelp, scanHelp, versionText } from "../src/cli.js";
+import { main } from "../src/cli.js";
 
 function capture(): {
   stream: Pick<NodeJS.WriteStream, "write">;
@@ -53,6 +53,12 @@ describe("TypeScript package skeleton", () => {
   test("exports the async client and curated error base", async () => {
     const client = new CodexSecurity({ pluginPath: "/tmp/plugin" });
     expect(client.config.pluginPath).toBe("/tmp/plugin");
+    expect(client.metadata).toEqual({
+      sdk: "@openai/codex-sdk",
+      sdkVersion: "0.144.6",
+      executable: "@openai/codex",
+      executableVersion: "0.144.6",
+    });
     expect(new CodexSecurityError("failure").name).toBe("CodexSecurityError");
     await client.close();
   });
@@ -61,20 +67,22 @@ describe("TypeScript package skeleton", () => {
     const stdout = capture();
     const stderr = capture();
     expect(await main([], stdout.stream, stderr.stream)).toBe(0);
-    expect(stdout.text()).toBe(`${rootHelp()}\n`);
+    expect(stdout.text()).toContain("Usage: codex-security <command>");
+    expect(stdout.text()).toContain("Integrations:");
     expect(stderr.text()).toBe("");
 
     const versionOutput = capture();
     expect(await main(["--version"], versionOutput.stream, stderr.stream)).toBe(
       0,
     );
-    expect(versionOutput.text()).toBe(`${versionText()}\n`);
-    expect(versionText()).toContain(VERSION);
+    expect(versionOutput.text()).toBe(`${VERSION}\n`);
 
     const scanHelpOutput = capture();
     expect(
       await main(["scan", "--help"], scanHelpOutput.stream, stderr.stream),
     ).toBe(0);
-    expect(scanHelpOutput.text()).toBe(`${scanHelp()}\n`);
+    expect(scanHelpOutput.text()).toContain(
+      "Usage: codex-security scan [repository]",
+    );
   });
 });

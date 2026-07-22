@@ -1,2 +1,0 @@
-codex-security 0.1.0b3
-codex-security plugin 0.1.14 (bundled)

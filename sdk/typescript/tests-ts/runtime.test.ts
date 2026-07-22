@@ -1,4 +1,4 @@
-import { renameSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, renameSync, symlinkSync } from "node:fs";
 import {
   chmod,
   mkdir,
@@ -6,15 +6,24 @@ import {
   readFile,
   realpath,
   readdir,
-  rename,
   rm,
   stat,
   symlink,
+  truncate,
   writeFile,
 } from "node:fs/promises";
+import * as fsPromises from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, parse, relative, sep } from "node:path";
-import { afterEach, describe, expect, test } from "bun:test";
+import {
+  delimiter,
+  dirname,
+  isAbsolute,
+  join,
+  parse,
+  relative,
+  sep,
+} from "node:path";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import {
   bootstrapPlugin,
@@ -26,7 +35,6 @@ import {
   pluginExecutionEnvironment,
   PluginBootstrapError,
   PluginPythonUnavailableError,
-  OutputDirectoryError,
   prepareOutputDir,
   resolveCodexCommand,
   resolvePluginPath,
@@ -37,6 +45,8 @@ import {
   bundledPluginCandidates,
   codexPlatformPackage,
   isPythonPathCandidate,
+  planOutputArchive,
+  requirePrivateOutputDirectory,
 } from "../src/runtime.js";
 
 const temporaryDirectories: string[] = [];
@@ -93,7 +103,10 @@ describe("plugin runtime preparation", () => {
     const root = await temporaryDirectory();
     const workspace = join(root, "workspace");
     await mkdir(workspace);
-    const projected = await resolvePluginPath(undefined, workspace);
+    const source = await resolvePluginPath(undefined, workspace);
+    expect(source).toBe(await bundledPluginRoot());
+    const marketplace = await createMarketplace(join(root, "home"), source);
+    const projected = join(marketplace, "plugins", "codex-security");
     expect(
       await readFile(join(projected, ".codex-plugin", "plugin.json"), "utf8"),
     ).toContain('"name": "codex-security"');
@@ -106,6 +119,43 @@ describe("plugin runtime preparation", () => {
         join(await bundledPluginRoot(), ".codex-plugin", "plugin.json"),
       ),
     ).toBeDefined();
+  });
+
+  test("uses a configured plugin directory directly", async () => {
+    const root = await temporaryDirectory();
+    const ambientHome = join(root, ".codex", "plugins", "cache");
+    const workspace = join(root, "bootstrap");
+    await mkdir(ambientHome, { recursive: true });
+    await mkdir(workspace);
+    const source = await plugin(ambientHome);
+    await chmod(join(source, "scripts", "helper.py"), 0o750);
+
+    const selected = await resolvePluginPath(source, workspace);
+
+    expect(selected).toBe(await realpath(source));
+    expect(existsSync(join(workspace, "selected-plugin"))).toBe(false);
+    expect(await readFile(join(selected, "scripts", "helper.py"), "utf8")).toBe(
+      "print('ok')\n",
+    );
+    if (process.platform !== "win32") {
+      expect(
+        (await stat(join(selected, "scripts", "helper.py"))).mode & 0o777,
+      ).toBe(0o750);
+    }
+  });
+
+  test("honors cancellation while staging a configured plugin directory", async () => {
+    const root = await temporaryDirectory();
+    const workspace = join(root, "bootstrap");
+    await mkdir(workspace);
+    const source = await plugin(root);
+    const controller = new AbortController();
+    controller.abort(new DOMException("canceled", "AbortError"));
+
+    await expect(
+      resolvePluginPath(source, workspace, controller.signal),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(existsSync(join(workspace, "selected-plugin"))).toBe(false);
   });
 
   test("creates the SDK marketplace around a validated plugin", async () => {
@@ -131,6 +181,171 @@ describe("plugin runtime preparation", () => {
         ),
       ),
     ).toBeDefined();
+  });
+
+  testPosix(
+    "rejects plugin symlinks and removes the partial marketplace",
+    async () => {
+      const root = await temporaryDirectory();
+      const selected = await plugin(root);
+      const helper = join(selected, "scripts", "helper.py");
+      const outside = join(root, "outside-secret");
+      const destination = join(
+        root,
+        "home",
+        "sdk-marketplace",
+        "plugins",
+        "codex-security",
+      );
+      await writeFile(outside, "OUTSIDE_SECRET");
+      await rm(helper);
+      await symlink(outside, helper);
+
+      await expect(
+        createMarketplace(join(root, "home"), selected),
+      ).rejects.toThrow(PluginBootstrapError);
+      expect(existsSync(destination)).toBe(false);
+      expect(await readFile(outside, "utf8")).toBe("OUTSIDE_SECRET");
+    },
+  );
+
+  testPosix(
+    "does not let a configured plugin contract bypass the safe copy",
+    async () => {
+      const root = await temporaryDirectory();
+      const selected = await plugin(root);
+      const contract = join(
+        selected,
+        ".internal",
+        "external-promotion",
+        "external-projection-contract.json",
+      );
+      const helper = join(selected, "scripts", "helper.py");
+      const outside = join(root, "outside-secret");
+      const destination = join(
+        root,
+        "home",
+        "sdk-marketplace",
+        "plugins",
+        "codex-security",
+      );
+      await mkdir(dirname(contract), { recursive: true });
+      await writeFile(contract, JSON.stringify({ shippedExact: [] }));
+      await writeFile(outside, "OUTSIDE_SECRET");
+      await rm(helper);
+      await symlink(outside, helper);
+
+      await expect(
+        createMarketplace(join(root, "home"), selected),
+      ).rejects.toThrow(PluginBootstrapError);
+      expect(existsSync(destination)).toBe(false);
+      expect(await readFile(outside, "utf8")).toBe("OUTSIDE_SECRET");
+    },
+  );
+
+  testPosix(
+    "rejects a queued plugin directory replaced with a symlink",
+    async () => {
+      const root = await temporaryDirectory();
+      const selected = await plugin(root);
+      const scripts = join(selected, "scripts");
+      const helper = join(scripts, "helper.py");
+      const outsideScripts = join(root, "outside-scripts");
+      const destination = join(
+        root,
+        "home",
+        "sdk-marketplace",
+        "plugins",
+        "codex-security",
+      );
+      await mkdir(outsideScripts);
+      await writeFile(join(outsideScripts, "helper.py"), "OUTSIDE_SECRET");
+      const originalLstat = fsPromises.lstat;
+      let swapped = false;
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        lstat: async (...args: Parameters<typeof originalLstat>) => {
+          if (!swapped && String(args[0]) === helper) {
+            swapped = true;
+            renameSync(scripts, `${scripts}.real`);
+            symlinkSync(outsideScripts, scripts, "dir");
+          }
+          return await originalLstat(...args);
+        },
+      }));
+
+      try {
+        await expect(
+          createMarketplace(join(root, "home"), selected),
+        ).rejects.toThrow(PluginBootstrapError);
+        expect(swapped).toBe(true);
+        expect(existsSync(destination)).toBe(false);
+        expect(await readFile(join(outsideScripts, "helper.py"), "utf8")).toBe(
+          "OUTSIDE_SECRET",
+        );
+      } finally {
+        mock.module("node:fs/promises", () => ({
+          ...fsPromises,
+          lstat: originalLstat,
+        }));
+      }
+    },
+  );
+
+  testPosix(
+    "rejects unsafe configured plugin manifests without hanging",
+    async () => {
+      for (const kind of ["fifo", "symlink", "sparse"] as const) {
+        const root = await temporaryDirectory();
+        const workspace = join(root, "workspace");
+        const source = join(root, "plugin");
+        const manifest = join(source, ".codex-plugin", "plugin.json");
+        const outside = join(root, "outside-manifest");
+        await mkdir(dirname(manifest), { recursive: true });
+        await mkdir(workspace);
+        await writeFile(
+          outside,
+          JSON.stringify({ name: "codex-security", version: "1.2.3" }),
+        );
+        if (kind === "fifo") {
+          expect(Bun.spawnSync(["mkfifo", manifest]).exitCode).toBe(0);
+        } else if (kind === "symlink") {
+          await symlink(outside, manifest);
+        } else {
+          await writeFile(manifest, "{}");
+          await truncate(manifest, 2 * 1024 * 1024);
+        }
+
+        await expect(resolvePluginPath(source, workspace)).rejects.toThrow(
+          PluginBootstrapError,
+        );
+      }
+    },
+  );
+
+  test("cancels marketplace projection before registering the plugin", async () => {
+    const root = await temporaryDirectory();
+    const selected = await plugin(root);
+    const home = join(root, "home");
+    await mkdir(home);
+    const controller = new AbortController();
+    let registrationCalls = 0;
+    controller.abort(new DOMException("canceled", "AbortError"));
+
+    await expect(
+      bootstrapPlugin(home, selected, {
+        codexCommand: { command: "/codex", prefixArgs: [] },
+        signal: controller.signal,
+        runCodex: async () => {
+          registrationCalls += 1;
+          return "";
+        },
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(registrationCalls).toBe(0);
+    expect(
+      existsSync(join(home, "sdk-marketplace", "plugins", "codex-security")),
+    ).toBe(false);
   });
 
   test("extracts a plugin in one top-level directory", async () => {
@@ -201,7 +416,21 @@ describe("plugin runtime preparation", () => {
     const unsafeArchives: Array<[string, Uint8Array]> = [
       ["traversal", zipSync({ "../escape": strToU8("bad") })],
       ["drive", zipSync({ "D:/escape": strToU8("bad") })],
-      ["backslash", zipSync({ "release\\escape": strToU8("bad") })],
+      ["backslash", zipSync({ "release\\helper.py": strToU8("bad") })],
+      [
+        "duplicate",
+        zipSync({
+          "release/file.txt": strToU8("one"),
+          "release/./file.txt": strToU8("two"),
+        }),
+      ],
+      [
+        "case-collision",
+        zipSync({
+          "release/scripts/File.py": strToU8("safe"),
+          "release/scripts/file.py": strToU8("overwrite"),
+        }),
+      ],
       [
         "symlink",
         zipSync({
@@ -222,6 +451,27 @@ describe("plugin runtime preparation", () => {
     }
   });
 
+  test("rejects a ZIP entry with an invalid CRC-32", async () => {
+    const root = await temporaryDirectory();
+    const archive = join(root, "invalid-crc.zip");
+    const bytes = Buffer.from(
+      zipSync(
+        {
+          "release/.codex-plugin/plugin.json": strToU8(
+            JSON.stringify({ name: "codex-security", version: "1.2.3" }),
+          ),
+          "release/helper.py": strToU8("ORIGINAL"),
+        },
+        { level: 0 },
+      ),
+    );
+    bytes.write("TAMPERED", bytes.indexOf("ORIGINAL"), "ascii");
+    await writeFile(archive, bytes);
+    await expect(
+      extractPluginZip(archive, join(root, "extract")),
+    ).rejects.toThrow("CRC-32");
+  });
+
   test("reports malformed ZIPs as plugin bootstrap errors", async () => {
     const root = await temporaryDirectory();
     const archive = join(root, "bad.zip");
@@ -231,24 +481,23 @@ describe("plugin runtime preparation", () => {
     ).rejects.toThrow("Invalid plugin ZIP");
   });
 
-  test("rejects ZIP entries whose contents fail CRC-32 validation", async () => {
+  test("rejects ZIPs with too many entries", async () => {
     const root = await temporaryDirectory();
-    const archive = Buffer.from(
+    const archive = join(root, "too-many.zip");
+    await writeFile(
+      archive,
       zipSync(
-        {
-          "release/file.txt": strToU8("ORIGINAL"),
-        },
-        { level: 0 },
+        Object.fromEntries(
+          Array.from({ length: 4_097 }, (_, index) => [
+            `release/${index}.txt`,
+            new Uint8Array(),
+          ]),
+        ),
       ),
     );
-    const contentOffset = archive.indexOf("ORIGINAL");
-    expect(contentOffset).toBeGreaterThanOrEqual(0);
-    archive.write("TAMPERED", contentOffset, "utf8");
-    const path = join(root, "bad-crc.zip");
-    await writeFile(path, archive);
-    await expect(extractPluginZip(path, join(root, "extract"))).rejects.toThrow(
-      "CRC-32",
-    );
+    await expect(
+      extractPluginZip(archive, join(root, "extract")),
+    ).rejects.toThrow("too many entries");
   });
 
   test("rejects ZIP entries whose declared expansion exceeds the limit", async () => {
@@ -389,6 +638,77 @@ describe("plugin runtime preparation", () => {
 });
 
 describe("runtime directories and plugin Python boundary", () => {
+  testPosix("rejects private output directories owned by another user", () => {
+    expect(() =>
+      requirePrivateOutputDirectory(
+        { mode: 0o40700, uid: 1001 },
+        "/scan",
+        1000,
+      ),
+    ).toThrow("must be owned by the current user");
+    expect(() =>
+      requirePrivateOutputDirectory(
+        { mode: 0o40700, uid: 1000 },
+        "/scan",
+        1000,
+      ),
+    ).not.toThrow();
+  });
+
+  test("archives a non-empty private output directory", async () => {
+    const root = await temporaryDirectory();
+    const output = join(root, "scan");
+    await mkdir(output, { mode: 0o700 });
+    await writeFile(join(output, "previous.txt"), "previous scan\n");
+
+    await expect(validateOutputDir(output)).rejects.toThrow(
+      "To keep the existing results and start a new scan, add --archive-existing",
+    );
+    expect(await validateOutputDir(output, true)).toBe(output);
+    const preview = await planOutputArchive(output);
+    expect(preview?.startsWith(`${output}.previous-`)).toBe(true);
+    expect(await readFile(join(output, "previous.txt"), "utf8")).toBe(
+      "previous scan\n",
+    );
+    await expect(stat(preview!)).rejects.toThrow();
+
+    let archived: string | undefined;
+    expect(
+      await prepareOutputDir(
+        output,
+        "repo",
+        undefined,
+        undefined,
+        true,
+        (archiveDir) => {
+          archived = archiveDir;
+        },
+      ),
+    ).toBe(output);
+    expect(archived?.startsWith(`${output}.previous-`)).toBe(true);
+    expect(await readFile(join(archived!, "previous.txt"), "utf8")).toBe(
+      "previous scan\n",
+    );
+    expect(await readdir(output)).toEqual([]);
+    if (process.platform !== "win32") {
+      expect((await stat(output)).mode & 0o777).toBe(0o700);
+
+      const linkedOutput = join(root, "linked-scan");
+      await symlink(archived!, linkedOutput);
+      await expect(validateOutputDir(linkedOutput, true)).rejects.toThrow(
+        "not a directory",
+      );
+
+      await chmod(archived!, 0o770);
+      await expect(validateOutputDir(archived!, true)).rejects.toThrow(
+        "must not be accessible to other users",
+      );
+      await chmod(archived!, 0o700);
+    }
+
+    expect(await planOutputArchive(output)).toBeNull();
+  });
+
   test("validates explicit output directories and creates private temporary paths", async () => {
     const root = await temporaryDirectory();
     const absent = join(root, "scan");
@@ -408,10 +728,19 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(await prepareOutputDir(absent, "repo")).toBe(absent);
     if (process.platform !== "win32") {
       const callerOwned = join(root, "caller-owned");
-      await mkdir(callerOwned, { mode: 0o770 });
-      await chmod(callerOwned, 0o770);
+      await mkdir(callerOwned, { mode: 0o700 });
+      for (const mode of [0o770, 0o777]) {
+        await chmod(callerOwned, mode);
+        await expect(validateOutputDir(callerOwned)).rejects.toThrow(
+          "must not be accessible to other users",
+        );
+        await expect(prepareOutputDir(callerOwned, "repo")).rejects.toThrow(
+          "must not be accessible to other users",
+        );
+      }
+      await chmod(callerOwned, 0o700);
       expect(await prepareOutputDir(callerOwned, "repo")).toBe(callerOwned);
-      expect((await stat(callerOwned)).mode & 0o777).toBe(0o770);
+      expect((await stat(callerOwned)).mode & 0o777).toBe(0o700);
     }
     if (process.platform !== "win32") {
       const filesystemChild = join(
@@ -421,7 +750,7 @@ describe("runtime directories and plugin Python boundary", () => {
       expect(await validateOutputDir(filesystemChild)).toBe(filesystemChild);
     }
     await writeFile(join(absent, "occupied"), "x");
-    await expect(validateOutputDir(absent)).rejects.toThrow("must be empty");
+    await expect(validateOutputDir(absent)).rejects.toThrow("is not empty");
 
     const home = await createIsolatedHome();
     temporaryDirectories.push(home);
@@ -448,7 +777,7 @@ describe("runtime directories and plugin Python boundary", () => {
         prepareOutputDir(unsafeCanonicalScan, "repo"),
       ).rejects.toThrow("control or line-separator");
       await expect(stat(join(unsafeCanonicalParent, "scan"))).rejects.toThrow();
-      await mkdir(join(unsafeCanonicalParent, "existing"));
+      await mkdir(join(unsafeCanonicalParent, "existing"), { mode: 0o700 });
       await expect(
         validateOutputDir(join(safeLinkedParent, "existing")),
       ).rejects.toThrow("control or line-separator");
@@ -475,97 +804,6 @@ describe("runtime directories and plugin Python boundary", () => {
       } finally {
         process.umask(previousUmask);
       }
-
-      const repository = join(root, "repository");
-      const movableParent = join(root, "movable-parent");
-      const movedParent = join(root, "moved-parent");
-      await mkdir(repository);
-      await mkdir(movableParent);
-      const requested = await validateOutputDir(join(movableParent, "scan"));
-      expect(requested).not.toBeNull();
-      await rename(movableParent, movedParent);
-      await symlink(repository, movableParent);
-      let checkedPath: string | undefined;
-      await expect(
-        prepareOutputDir(requested ?? undefined, "repo", undefined, (path) => {
-          checkedPath = path;
-          throw new Error("unsafe output location");
-        }),
-      ).rejects.toThrow("unsafe output location");
-      expect(checkedPath).toBe(join(repository, "scan"));
-      await expect(stat(join(repository, "scan"))).rejects.toThrow();
-
-      const temporaryRoot = join(root, "temporary-root");
-      const movedTemporaryRoot = join(root, "moved-temporary-root");
-      await mkdir(temporaryRoot);
-      let checks = 0;
-      await expect(
-        prepareOutputDir(undefined, "repo", temporaryRoot, (path) => {
-          checks += 1;
-          if (checks === 1) {
-            renameSync(temporaryRoot, movedTemporaryRoot);
-            symlinkSync(repository, temporaryRoot);
-          } else {
-            expect(path.startsWith(`${repository}${sep}`)).toBe(true);
-            throw new Error("unsafe temporary output location");
-          }
-        }),
-      ).rejects.toThrow("unsafe temporary output location");
-      expect(checks).toBe(2);
-      expect(await readdir(repository)).toEqual([]);
-
-      const runtimeVictim = join(root, "runtime-victim");
-      await mkdir(runtimeVictim);
-      await expect(
-        createIsolatedHome(root, (path) => {
-          renameSync(path, `${path}-moved`);
-          symlinkSync(runtimeVictim, path);
-        }),
-      ).rejects.toThrow("changed during preparation");
-      expect(await readdir(runtimeVictim)).toEqual([]);
-
-      const cleanupParent = join(root, "cleanup-parent");
-      const movedCleanupParent = join(root, "moved-cleanup-parent");
-      const victim = join(root, "cleanup-victim");
-      const victimScan = join(victim, "one", "scan");
-      await mkdir(victimScan, { recursive: true });
-      let cleanupChecks = 0;
-      await expect(
-        prepareOutputDir(
-          join(cleanupParent, "one", "scan"),
-          "repo",
-          undefined,
-          () => {
-            cleanupChecks += 1;
-            if (cleanupChecks === 2) {
-              renameSync(cleanupParent, movedCleanupParent);
-              symlinkSync(victim, cleanupParent);
-              throw new Error("unsafe cleanup location");
-            }
-          },
-        ),
-      ).rejects.toThrow("Unable to create scan output directory");
-      expect(cleanupChecks).toBe(2);
-      await expect(stat(victimScan)).resolves.toBeDefined();
-      await expect(
-        stat(join(movedCleanupParent, "one", "scan")),
-      ).resolves.toBeDefined();
-
-      const leafParent = join(root, "leaf-parent");
-      const leaf = join(leafParent, "scan");
-      await mkdir(leafParent);
-      let leafChecks = 0;
-      await expect(
-        prepareOutputDir(leaf, "repo", undefined, (path) => {
-          leafChecks += 1;
-          if (leafChecks === 2) {
-            rmSync(path, { recursive: true, force: true });
-            symlinkSync(repository, path);
-          }
-        }),
-      ).rejects.toBeInstanceOf(OutputDirectoryError);
-      expect(leafChecks).toBe(2);
-      expect(await readdir(repository)).toEqual([]);
     }
   });
 
@@ -574,7 +812,7 @@ describe("runtime directories and plugin Python boundary", () => {
     const configured = join(root, "configured-python");
     await writeFile(
       configured,
-      '#!/bin/sh\n[ "$1" = "-c" ] || exit 1\ncase "$2" in *"raise SystemExit(1)"*) ;; *) exit 1 ;; esac\ncase "$2" in *assert*) exit 1 ;; esac\nprintf "codex-security-python-ok\\n"\n',
+      '#!/bin/sh\n[ "$1" = "-I" ] || exit 1\n[ "$2" = "-c" ] || exit 1\ncase "$3" in *"raise SystemExit(1)"*) ;; *) exit 1 ;; esac\ncase "$3" in *assert*) exit 1 ;; esac\nprintf "codex-security-python-ok\\n"\n',
     );
     await chmod(configured, 0o700);
     const canonicalConfigured = await realpath(configured);
@@ -603,7 +841,7 @@ describe("runtime directories and plugin Python boundary", () => {
     });
     await writeFile(
       managed,
-      '#!/bin/sh\n[ "$1" = "-c" ] || exit 1\ncase "$2" in *"raise SystemExit(1)"*) ;; *) exit 1 ;; esac\ncase "$2" in *assert*) exit 1 ;; esac\nprintf "codex-security-python-ok\\n"\n',
+      '#!/bin/sh\n[ "$1" = "-I" ] || exit 1\n[ "$2" = "-c" ] || exit 1\ncase "$3" in *"raise SystemExit(1)"*) ;; *) exit 1 ;; esac\ncase "$3" in *assert*) exit 1 ;; esac\nprintf "codex-security-python-ok\\n"\n',
     );
     await chmod(managed, 0o700);
     expect(
@@ -623,6 +861,96 @@ describe("runtime directories and plugin Python boundary", () => {
       }),
     ).rejects.toThrow(PluginPythonUnavailableError);
   });
+
+  testPosix(
+    "does not load repository-controlled Python startup code",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const marker = join(root, "sitecustomize-executed");
+      const interpreter = Bun.which("python3");
+      expect(interpreter).not.toBeNull();
+      if (interpreter === null) return;
+
+      await mkdir(repository);
+      await writeFile(
+        join(repository, "sitecustomize.py"),
+        `from pathlib import Path\nPath(${JSON.stringify(marker)}).write_text("executed")\n`,
+      );
+      const environment = { ...process.env, PYTHONPATH: repository };
+      const control = Bun.spawnSync([interpreter, "-c", "pass"], {
+        env: environment,
+      });
+      expect(control.exitCode).toBe(0);
+      expect(existsSync(marker)).toBe(true);
+      await rm(marker);
+
+      expect(
+        await resolvePluginPython({
+          configuredPath: interpreter,
+          environment,
+          protectedRoot: repository,
+        }),
+      ).toBe(await realpath(interpreter));
+      expect(existsSync(marker)).toBe(false);
+    },
+  );
+
+  testPosix(
+    "does not execute repository-local Python shims from PATH",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const unsafeBin = join(repository, "node_modules", ".bin");
+      const linkedBin = join(root, "linked-bin");
+      const trustedBin = root;
+      const marker = join(root, "python-executed");
+      const observedPath = join(root, "python-path");
+      const unsafePython = join(unsafeBin, "python3");
+      const trustedPython = join(trustedBin, "python3");
+      await mkdir(unsafeBin, { recursive: true });
+      await mkdir(linkedBin);
+      await writeFile(
+        unsafePython,
+        `#!/bin/sh\nprintf 'executed\\n' > '${marker}'\nprintf 'codex-security-python-ok\\n'\n`,
+      );
+      await chmod(unsafePython, 0o700);
+      await symlink(unsafePython, join(linkedBin, "python3"));
+      await writeFile(
+        trustedPython,
+        `#!/bin/sh\nprintf '%s\\n' "$PATH" > '${observedPath}'\nprintf 'codex-security-python-ok\\n'\n`,
+      );
+      await chmod(trustedPython, 0o700);
+
+      expect(
+        await resolvePluginPython({
+          environment: {
+            PATH: [
+              unsafeBin,
+              linkedBin,
+              "node_modules/.bin",
+              "",
+              trustedBin,
+            ].join(delimiter),
+          },
+          homeDirectory: root,
+          managedRuntimeRoots: [],
+          protectedRoot: repository,
+        }),
+      ).toBe(await realpath(trustedPython));
+      expect(existsSync(marker)).toBe(false);
+      expect((await readFile(observedPath, "utf8")).trim()).toBe(trustedBin);
+
+      await expect(
+        resolvePluginPython({
+          configuredPath: unsafePython,
+          environment: { PATH: trustedBin },
+          protectedRoot: repository,
+        }),
+      ).rejects.toThrow(PluginPythonUnavailableError);
+      expect(existsSync(marker)).toBe(false);
+    },
+  );
 
   test("recognizes Python paths using either platform separator", () => {
     expect(isPythonPathCandidate("runtime/python3")).toBe(true);

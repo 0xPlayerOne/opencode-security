@@ -1,7 +1,7 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { constants, createReadStream, existsSync, type Stats } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { constants, existsSync, type Stats } from "node:fs";
 import {
-  access,
   chmod,
   copyFile,
   lstat,
@@ -19,16 +19,27 @@ import {
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { createRequire } from "node:module";
-import { basename, dirname, extname, join, relative, resolve } from "node:path";
+import {
+  basename,
+  dirname,
+  extname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { crc32 } from "node:zlib";
+import extractZip from "extract-zip";
 import { parse } from "smol-toml";
-import { Unzip, UnzipInflate, type UnzipFile } from "fflate";
 import {
   OutputDirectoryError,
   PluginBootstrapError,
   PluginPythonUnavailableError,
 } from "./errors.js";
+import { resolveTrustedExecutable } from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -39,14 +50,11 @@ const MAX_ZIP_ENTRIES = 4_096;
 const MAX_ZIP_CENTRAL_DIRECTORY = 16 * 1024 * 1024;
 const MAX_ZIP_ENTRY_SIZE = 128 * 1024 * 1024;
 const MAX_ZIP_EXPANDED_SIZE = 512 * 1024 * 1024;
+const MAX_PLUGIN_MANIFEST_SIZE = 1024 * 1024;
+const MAX_PLUGIN_COPY_ENTRIES = 4_096;
+const MAX_PLUGIN_COPY_FILE_SIZE = 128 * 1024 * 1024;
+const MAX_PLUGIN_COPY_SIZE = 512 * 1024 * 1024;
 const MODEL_UNSAFE_PATH = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u;
-const CRC32_TABLE = Uint32Array.from({ length: 256 }, (_, index) => {
-  let value = index;
-  for (let bit = 0; bit < 8; bit += 1) {
-    value = (value & 1) !== 0 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
-  }
-  return value >>> 0;
-});
 
 export interface PluginInstall {
   pluginRoot: string;
@@ -69,6 +77,7 @@ export interface PluginPythonOptions {
   environment?: ProcessEnvironment;
   homeDirectory?: string;
   managedRuntimeRoots?: readonly string[];
+  protectedRoot?: string;
   signal?: AbortSignal;
 }
 
@@ -99,6 +108,7 @@ export async function bundledPluginRoot(): Promise<string> {
 
 export async function validateOutputDir(
   outputDirectory?: string,
+  archiveExisting = false,
 ): Promise<string | null> {
   if (outputDirectory === undefined) {
     return null;
@@ -116,11 +126,12 @@ export async function validateOutputDir(
           `Scan output is not a directory: ${path}`,
         );
       }
-      if ((await readdir(path)).length !== 0) {
+      if (!archiveExisting && (await readdir(path)).length !== 0) {
         throw new OutputDirectoryError(
-          `Scan output directory must be empty: ${path}`,
+          `Scan output directory is not empty: ${path}. To keep the existing results and start a new scan, add --archive-existing.`,
         );
       }
+      requirePrivateOutputDirectory(metadata, path);
       const canonical = await realpath(path);
       requireModelSafeOutputDir(canonical);
       return canonical;
@@ -157,6 +168,22 @@ export async function validateOutputDir(
   }
 }
 
+export async function planOutputArchive(
+  outputDirectory: string | null,
+): Promise<string | null> {
+  if (outputDirectory === null) return null;
+  const entries = await readdir(outputDirectory).catch((error: unknown) => {
+    if (nodeErrorCode(error) === "ENOENT") return null;
+    throw error;
+  });
+  if (entries === null || entries.length === 0) return null;
+  const timestamp = new Date()
+    .toISOString()
+    .replaceAll(/[-:]/g, "")
+    .replace(/\.\d{3}Z$/, "");
+  return `${outputDirectory}.previous-${timestamp}-${randomUUID().slice(0, 8)}`;
+}
+
 export function requireModelSafeOutputDir(path: string): void {
   if (MODEL_UNSAFE_PATH.test(path)) {
     throw new OutputDirectoryError(
@@ -170,12 +197,14 @@ export async function prepareOutputDir(
   repositoryName: string,
   temporaryRoot: string = tmpdir(),
   validateLocation?: (path: string) => void,
+  archiveExisting = false,
+  onOutputArchived?: (archiveDir: string) => void,
 ): Promise<string> {
   if (outputDirectory === undefined) {
     requireModelSafeOutputDir(temporaryRoot);
     requireModelSafeOutputDir(await realpath(temporaryRoot));
   }
-  const path = await validateOutputDir(outputDirectory);
+  const path = await validateOutputDir(outputDirectory, archiveExisting);
   validateLocation?.(path ?? (await realpath(temporaryRoot)));
   if (path === null) {
     const created = await mkdtemp(
@@ -190,26 +219,27 @@ export async function prepareOutputDir(
     }
   }
   let createdRoot: string | undefined;
-  let createdRootMetadata: Pick<Stats, "dev" | "ino"> | undefined;
   try {
-    const existing = await lstat(path).catch((error: unknown) => {
+    let existing = await lstat(path).catch((error: unknown) => {
       if (nodeErrorCode(error) === "ENOENT") return null;
       throw error;
     });
+    if (existing !== null && archiveExisting) {
+      const archiveDir = await planOutputArchive(path);
+      if (archiveDir !== null) {
+        await rename(path, archiveDir);
+        onOutputArchived?.(archiveDir);
+        existing = null;
+      }
+    }
     if (existing === null) {
       createdRoot = await mkdir(path, { recursive: true, mode: 0o700 });
-      if (createdRoot === undefined) {
-        throw new OutputDirectoryError(
-          `Scan output directory changed during preparation: ${path}`,
-        );
-      }
       if ((process.umask() & 0o700) !== 0) await chmod(path, 0o700);
-      createdRootMetadata = await lstat(createdRoot);
     }
     return await validatePreparedOutputDir(path, validateLocation);
   } catch (error) {
-    if (createdRoot !== undefined && createdRootMetadata !== undefined) {
-      await removeEmptyDirectories(path, createdRoot, createdRootMetadata);
+    if (createdRoot !== undefined) {
+      await removeEmptyDirectories(path, createdRoot);
     }
     if (error instanceof OutputDirectoryError) throw error;
     throw new OutputDirectoryError(
@@ -224,59 +254,46 @@ export async function prepareOutputDir(
 export async function validatePreparedOutputDir(
   path: string,
   validateLocation?: (path: string) => void,
-  expected?: Pick<Stats, "dev" | "ino">,
 ): Promise<string> {
-  const before = await lstat(path);
+  const metadata = await lstat(path);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new OutputDirectoryError(`Scan output is not a directory: ${path}`);
+  }
   const canonical = await realpath(path);
   requireModelSafeOutputDir(canonical);
   validateLocation?.(canonical);
   const entries = await readdir(canonical);
-  const current = await lstat(path);
-  const returned = await lstat(canonical);
-  if (
-    !before.isDirectory() ||
-    before.isSymbolicLink() ||
-    !current.isDirectory() ||
-    current.isSymbolicLink() ||
-    !returned.isDirectory() ||
-    returned.isSymbolicLink() ||
-    before.dev !== current.dev ||
-    before.ino !== current.ino ||
-    before.dev !== returned.dev ||
-    before.ino !== returned.ino ||
-    (expected !== undefined &&
-      (before.dev !== expected.dev || before.ino !== expected.ino))
-  ) {
-    throw new OutputDirectoryError(
-      `Scan output directory changed during preparation: ${path}`,
-    );
-  }
   if (entries.length !== 0) {
     throw new OutputDirectoryError(
       `Scan output directory must be empty: ${path}`,
     );
   }
+  requirePrivateOutputDirectory(metadata, path);
   return canonical;
+}
+
+export function requirePrivateOutputDirectory(
+  metadata: Pick<Stats, "mode" | "uid">,
+  path: string,
+  effectiveUid = process.geteuid?.(),
+): void {
+  if (process.platform === "win32") return;
+  if ((metadata.mode & 0o077) !== 0) {
+    throw new OutputDirectoryError(
+      `Scan output directory must not be accessible to other users (chmod 700): ${path}`,
+    );
+  }
+  if (effectiveUid !== undefined && metadata.uid !== effectiveUid) {
+    throw new OutputDirectoryError(
+      `Scan output directory must be owned by the current user: ${path}`,
+    );
+  }
 }
 
 async function removeEmptyDirectories(
   path: string,
   root: string,
-  expected: Pick<Stats, "dev" | "ino">,
 ): Promise<void> {
-  try {
-    const currentRoot = await lstat(root);
-    if (
-      !currentRoot.isDirectory() ||
-      currentRoot.isSymbolicLink() ||
-      currentRoot.dev !== expected.dev ||
-      currentRoot.ino !== expected.ino
-    ) {
-      return;
-    }
-  } catch {
-    return;
-  }
   let current = path;
   while (true) {
     try {
@@ -354,24 +371,71 @@ export async function extractPluginZip(
   signal?: AbortSignal,
 ): Promise<string> {
   const archivePath = resolve(expandHome(archive));
-  let inspected: ZipEntry[];
-  try {
-    inspected = await inspectZipFile(archivePath, signal);
-  } catch (error) {
-    throwIfSignalAborted(signal);
-    if (error instanceof PluginBootstrapError) throw error;
-    throw new PluginBootstrapError(`Invalid plugin ZIP: ${archivePath}`, {
-      cause: error,
-    });
-  }
-
   await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
   const staging = await realpath(
     await mkdtemp(join(dirname(destination), ".codex-security-plugin-")),
   );
   try {
     throwIfSignalAborted(signal);
-    await streamZipEntries(archivePath, staging, inspected, signal);
+    await rejectBackslashZipNames(archivePath, signal);
+    let expandedSize = 0;
+    const paths = new Set<string>();
+    const checksums: Array<{ path: string; checksum: number }> = [];
+    await extractZip(archivePath, {
+      dir: staging,
+      defaultDirMode: 0o700,
+      defaultFileMode: 0o600,
+      onEntry(entry, archive) {
+        throwIfSignalAborted(signal);
+        if (archive.entryCount > MAX_ZIP_ENTRIES) {
+          throw new PluginBootstrapError(
+            `Plugin ZIP contains too many entries: ${archive.entryCount}.`,
+          );
+        }
+        const path = safeArchivePath(entry.fileName);
+        const collisionKey = path.toLowerCase();
+        if (paths.has(collisionKey)) {
+          throw new PluginBootstrapError(
+            `Plugin ZIP contains a duplicate path: ${entry.fileName}`,
+          );
+        }
+        paths.add(collisionKey);
+        if (((entry.externalFileAttributes >>> 16) & 0o170000) === 0o120000) {
+          throw new PluginBootstrapError(
+            `Plugin ZIP contains an unsafe path: ${entry.fileName}`,
+          );
+        }
+        if (entry.uncompressedSize > MAX_ZIP_ENTRY_SIZE) {
+          throw new PluginBootstrapError(
+            `Plugin ZIP entry exceeds the safety limit: ${entry.fileName}`,
+          );
+        }
+        expandedSize += entry.uncompressedSize;
+        if (expandedSize > MAX_ZIP_EXPANDED_SIZE) {
+          throw new PluginBootstrapError(
+            "Plugin ZIP expanded size exceeds the safety limit.",
+          );
+        }
+        const mode = (entry.externalFileAttributes >>> 16) & 0o170000;
+        const directory =
+          entry.fileName.endsWith("/") ||
+          mode === 0o040000 ||
+          (entry.versionMadeBy >>> 8 === 0 &&
+            entry.externalFileAttributes === 16);
+        if (!directory) {
+          checksums.push({ path, checksum: entry.crc32 >>> 0 });
+        }
+      },
+    });
+    for (const { path, checksum } of checksums) {
+      throwIfSignalAborted(signal);
+      const bytes = await readFile(join(staging, ...path.split("/")));
+      if (crc32(bytes) !== checksum) {
+        throw new PluginBootstrapError(
+          `Plugin ZIP entry failed CRC-32 validation: ${path}`,
+        );
+      }
+    }
     const pluginRoot = await discoverPluginRoot(staging);
     throwIfSignalAborted(signal);
     const relativeRoot = relative(staging, pluginRoot);
@@ -387,25 +451,100 @@ export async function extractPluginZip(
   }
 }
 
+async function rejectBackslashZipNames(
+  path: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const handle = await open(path, "r");
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isFile() || metadata.size < 22) {
+      throw new Error("missing end of central directory");
+    }
+    const tailSize = Math.min(metadata.size, 65_557);
+    const tail = await readExactly(
+      handle,
+      tailSize,
+      metadata.size - tailSize,
+      signal,
+    );
+    let end = tail.byteLength - 22;
+    while (
+      end >= 0 &&
+      (tail.readUInt32LE(end) !== 0x06054b50 ||
+        end + 22 + tail.readUInt16LE(end + 20) !== tail.byteLength)
+    ) {
+      end -= 1;
+    }
+    if (end < 0) throw new Error("missing end of central directory");
+    const entries = tail.readUInt16LE(end + 10);
+    const centralSize = tail.readUInt32LE(end + 12);
+    const centralOffset = tail.readUInt32LE(end + 16);
+    if (
+      entries === 0xffff ||
+      centralSize === 0xffffffff ||
+      centralOffset === 0xffffffff
+    ) {
+      throw new Error("unsupported ZIP64 archive");
+    }
+    if (entries > MAX_ZIP_ENTRIES) {
+      throw new PluginBootstrapError(
+        `Plugin ZIP contains too many entries: ${entries}.`,
+      );
+    }
+    if (centralSize > MAX_ZIP_CENTRAL_DIRECTORY) {
+      throw new PluginBootstrapError(
+        "Plugin ZIP central directory exceeds the safety limit.",
+      );
+    }
+    const endOffset = metadata.size - tailSize + end;
+    if (centralOffset + centralSize > endOffset) {
+      throw new Error("invalid central directory bounds");
+    }
+    const central = await readExactly(
+      handle,
+      centralSize,
+      centralOffset,
+      signal,
+    );
+    let offset = 0;
+    for (let index = 0; index < entries; index += 1) {
+      if (
+        offset + 46 > central.byteLength ||
+        central.readUInt32LE(offset) !== 0x02014b50
+      ) {
+        throw new Error("invalid central directory");
+      }
+      const nameLength = central.readUInt16LE(offset + 28);
+      const extraLength = central.readUInt16LE(offset + 30);
+      const commentLength = central.readUInt16LE(offset + 32);
+      const nameStart = offset + 46;
+      const nameEnd = nameStart + nameLength;
+      if (nameEnd > central.byteLength) {
+        throw new Error("invalid central directory name");
+      }
+      if (central.subarray(nameStart, nameEnd).includes(0x5c)) {
+        throw new PluginBootstrapError(
+          "Plugin ZIP contains a backslash-qualified path.",
+        );
+      }
+      offset = nameEnd + extraLength + commentLength;
+    }
+    if (offset !== central.byteLength) {
+      throw new Error("invalid central directory size");
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
 export async function resolvePluginPath(
   pluginPath: string | undefined,
   workspace: string,
   signal?: AbortSignal,
 ): Promise<string> {
   if (pluginPath === undefined) {
-    const source = await bundledPluginRoot();
-    const projectionContract = join(
-      source,
-      ".internal",
-      "external-promotion",
-      "external-projection-contract.json",
-    );
-    if (await isRegularFile(projectionContract)) {
-      const destination = join(workspace, "bundled-plugin");
-      await copyExternalPayload(source, destination);
-      return await validatePluginRoot(destination);
-    }
-    return source;
+    return await bundledPluginRoot();
   }
 
   const path = resolve(expandHome(pluginPath));
@@ -418,6 +557,7 @@ export async function resolvePluginPath(
     );
   }
   if (metadata?.isDirectory() && !metadata.isSymbolicLink()) {
+    throwIfSignalAborted(signal);
     return await validatePluginRoot(path);
   }
   throw new PluginBootstrapError(
@@ -428,11 +568,27 @@ export async function resolvePluginPath(
 export async function createMarketplace(
   codexHome: string,
   pluginRoot: string,
+  signal?: AbortSignal,
 ): Promise<string> {
-  const root = await validatePluginRoot(pluginRoot);
+  throwIfSignalAborted(signal);
+  const root = await realpath(pluginRoot);
   const marketplace = join(codexHome, "sdk-marketplace");
   const pluginDestination = join(marketplace, "plugins", PLUGIN_NAME);
-  await copyPluginTree(root, pluginDestination);
+  const projectionContract = join(
+    root,
+    ".internal",
+    "external-promotion",
+    "external-projection-contract.json",
+  );
+  if (
+    root === (await bundledPluginRoot()) &&
+    (await isRegularFile(projectionContract))
+  ) {
+    await copyExternalPayload(root, pluginDestination);
+  } else {
+    await copyPluginTree(root, pluginDestination, signal);
+  }
+  throwIfSignalAborted(signal);
   const manifest = {
     name: MARKETPLACE_NAME,
     interface: { displayName: "Codex Security SDK" },
@@ -456,7 +612,9 @@ export async function createMarketplace(
     encoding: "utf8",
     flag: "wx",
     mode: 0o600,
+    signal,
   });
+  throwIfSignalAborted(signal);
   return marketplace;
 }
 
@@ -523,9 +681,9 @@ export async function bootstrapPlugin(
     signal?: AbortSignal;
   } = {},
 ): Promise<PluginInstall> {
-  const root = await validatePluginRoot(pluginRoot);
+  const root = await realpath(pluginRoot);
   const { name, version } = await pluginMetadata(root);
-  const marketplace = await createMarketplace(codexHome, root);
+  const marketplace = await createMarketplace(codexHome, root, options.signal);
   const command = options.codexCommand ?? resolveCodexCommand();
   const environment = {
     ...withoutApiKeyCredentials(options.environment ?? process.env),
@@ -583,7 +741,36 @@ export async function pluginMetadata(
   const manifestPath = join(root, ".codex-plugin", "plugin.json");
   let manifest: unknown;
   try {
-    manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    const expected = await lstat(manifestPath);
+    if (
+      !expected.isFile() ||
+      expected.isSymbolicLink() ||
+      expected.size > MAX_PLUGIN_MANIFEST_SIZE
+    ) {
+      throw new Error("plugin manifest is not a bounded regular file");
+    }
+    const input = await open(
+      manifestPath,
+      constants.O_RDONLY |
+        (process.platform === "win32"
+          ? 0
+          : constants.O_NOFOLLOW | constants.O_NONBLOCK),
+    );
+    try {
+      const opened = await input.stat();
+      if (!samePluginFile(expected, opened)) {
+        throw new Error("plugin manifest changed before reading");
+      }
+      const bytes = await readExactly(input, expected.size, 0);
+      if (!samePluginFile(expected, await input.stat())) {
+        throw new Error("plugin manifest changed while reading");
+      }
+      manifest = JSON.parse(
+        new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+      );
+    } finally {
+      await input.close();
+    }
   } catch (error) {
     throw new PluginBootstrapError(`Invalid Codex plugin directory: ${root}`, {
       cause: error,
@@ -607,11 +794,13 @@ export async function resolvePluginPython(
   options: PluginPythonOptions = {},
 ): Promise<string> {
   const environment = options.environment ?? process.env;
+  const protectedRoot = options.protectedRoot ?? process.cwd();
   if (options.configuredPath !== undefined) {
     return await requirePython(
       options.configuredPath,
       "configured plugin Python",
       environment,
+      protectedRoot,
       options.signal,
     );
   }
@@ -621,6 +810,7 @@ export async function resolvePluginPython(
       inherited,
       "PYTHON",
       environment,
+      protectedRoot,
       options.signal,
     );
   }
@@ -646,6 +836,7 @@ export async function resolvePluginPython(
       const resolved = await usablePython(
         candidate,
         environment,
+        protectedRoot,
         options.signal,
       );
       if (resolved !== null) return resolved;
@@ -655,11 +846,16 @@ export async function resolvePluginPython(
   for (const candidate of process.platform === "win32"
     ? ["python", "python3"]
     : ["python3", "python"]) {
-    const resolved = await usablePython(candidate, environment, options.signal);
+    const resolved = await usablePython(
+      candidate,
+      environment,
+      protectedRoot,
+      options.signal,
+    );
     if (resolved !== null) return resolved;
   }
   throw new PluginPythonUnavailableError(
-    "The unchanged Codex Security plugin requires Python, but no usable interpreter was found. " +
+    "The bundled Codex Security plugin requires Python 3.10 or later (Python 3.10 also requires tomli), but no usable interpreter was found. " +
       "Set pythonPath, --python, or PYTHON, install the Codex managed runtime, or add python3/python to PATH.",
   );
 }
@@ -790,9 +986,188 @@ async function verifyPluginRegistration(
 async function copyPluginTree(
   source: string,
   destination: string,
+  signal?: AbortSignal,
 ): Promise<void> {
+  const pending: Array<{ source: string; destination: string }> = [
+    { source, destination },
+  ];
+  const directories = new Map<string, Stats>();
+  let entries = 0;
+  let size = 0;
   await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
-  await copyTree(source, destination);
+  try {
+    while (pending.length > 0) {
+      throwIfSignalAborted(signal);
+      const current = pending.pop()!;
+      await requirePluginAncestors(source, current.source, directories, signal);
+      const metadata = await lstat(current.source);
+      if (++entries > MAX_PLUGIN_COPY_ENTRIES) {
+        throw new PluginBootstrapError(
+          `Plugin source exceeds the copy entry limit: ${current.source}`,
+        );
+      }
+      if (metadata.isSymbolicLink()) {
+        throw new PluginBootstrapError(
+          `Plugin contains an unsafe source path: ${current.source}`,
+        );
+      }
+      if (metadata.isDirectory()) {
+        const children = await readdir(current.source);
+        const afterRead = await lstat(current.source);
+        if (!samePluginFile(metadata, afterRead)) {
+          throw new PluginBootstrapError(
+            `Plugin directory changed while it was being copied: ${current.source}`,
+          );
+        }
+        directories.set(current.source, afterRead);
+        await mkdir(current.destination, { mode: 0o700 });
+        for (const child of children) {
+          pending.push({
+            source: join(current.source, child),
+            destination: join(current.destination, child),
+          });
+        }
+        continue;
+      }
+      if (!metadata.isFile()) {
+        throw new PluginBootstrapError(
+          `Plugin contains a non-regular file: ${current.source}`,
+        );
+      }
+      if (metadata.size > MAX_PLUGIN_COPY_FILE_SIZE) {
+        throw new PluginBootstrapError(
+          `Plugin source exceeds the per-file safety limit: ${current.source}`,
+        );
+      }
+      size += metadata.size;
+      if (size > MAX_PLUGIN_COPY_SIZE) {
+        throw new PluginBootstrapError(
+          "Plugin source exceeds the copy safety limit.",
+        );
+      }
+      const input = await open(
+        current.source,
+        constants.O_RDONLY |
+          (process.platform === "win32"
+            ? 0
+            : constants.O_NOFOLLOW | constants.O_NONBLOCK),
+      );
+      let output: Awaited<ReturnType<typeof open>> | undefined;
+      try {
+        if (!samePluginFile(metadata, await input.stat())) {
+          throw new PluginBootstrapError(
+            `Plugin source changed before it could be copied: ${current.source}`,
+          );
+        }
+        await requirePluginAncestors(
+          source,
+          current.source,
+          directories,
+          signal,
+        );
+        const bytes = await readExactly(input, metadata.size, 0, signal);
+        if (!samePluginFile(metadata, await input.stat())) {
+          throw new PluginBootstrapError(
+            `Plugin source changed while it was being copied: ${current.source}`,
+          );
+        }
+        await requirePluginAncestors(
+          source,
+          current.source,
+          directories,
+          signal,
+        );
+        output = await open(
+          current.destination,
+          constants.O_WRONLY |
+            constants.O_CREAT |
+            constants.O_EXCL |
+            (process.platform === "win32" ? 0 : constants.O_NOFOLLOW),
+          0o600,
+        );
+        await output.writeFile(bytes);
+        await output.chmod(metadata.mode & 0o777);
+      } finally {
+        await output?.close();
+        await input.close();
+      }
+    }
+  } catch (error) {
+    await rm(destination, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+async function requirePluginAncestors(
+  root: string,
+  path: string,
+  directories: ReadonlyMap<string, Stats>,
+  signal?: AbortSignal,
+): Promise<void> {
+  const relativePath = relative(root, path);
+  if (
+    relativePath === ".." ||
+    relativePath.startsWith(`..${sep}`) ||
+    isAbsolute(relativePath)
+  ) {
+    throw new PluginBootstrapError(
+      `Plugin source path escapes its root: ${path}`,
+    );
+  }
+  if (relativePath === "") return;
+
+  let ancestor = root;
+  const parents = ["", ...relativePath.split(sep).slice(0, -1)];
+  for (const component of parents) {
+    throwIfSignalAborted(signal);
+    if (component !== "") ancestor = join(ancestor, component);
+    const expected = directories.get(ancestor);
+    const actual = await lstat(ancestor);
+    if (
+      expected === undefined ||
+      actual.isSymbolicLink() ||
+      !actual.isDirectory() ||
+      !samePluginFile(expected, actual)
+    ) {
+      throw new PluginBootstrapError(
+        `Plugin source directory changed while it was being copied: ${ancestor}`,
+      );
+    }
+  }
+}
+
+function samePluginFile(first: Stats, second: Stats): boolean {
+  return (
+    first.dev === second.dev &&
+    first.ino === second.ino &&
+    first.size === second.size &&
+    first.mtimeMs === second.mtimeMs &&
+    first.mode === second.mode &&
+    first.isFile() === second.isFile() &&
+    first.isDirectory() === second.isDirectory()
+  );
+}
+
+async function readExactly(
+  handle: Awaited<ReturnType<typeof open>>,
+  length: number,
+  position: number,
+  signal?: AbortSignal,
+): Promise<Buffer> {
+  const buffer = Buffer.alloc(length);
+  let offset = 0;
+  while (offset < length) {
+    throwIfSignalAborted(signal);
+    const { bytesRead } = await handle.read(
+      buffer,
+      offset,
+      length - offset,
+      position + offset,
+    );
+    if (bytesRead === 0) throw new Error("unexpected end of plugin file");
+    offset += bytesRead;
+  }
+  return buffer;
 }
 
 async function copyExternalPayload(
@@ -845,471 +1220,6 @@ async function copyExternalPayload(
   }
 }
 
-async function copyTree(source: string, destination: string): Promise<void> {
-  const sourceMetadata = await lstat(source);
-  if (sourceMetadata.isSymbolicLink()) {
-    throw new PluginBootstrapError(
-      `Plugin contains a symbolic link: ${source}`,
-    );
-  }
-  if (sourceMetadata.isDirectory()) {
-    await mkdir(destination, { recursive: false, mode: 0o700 });
-    for (const entry of await readdir(source)) {
-      await copyTree(join(source, entry), join(destination, entry));
-    }
-    return;
-  }
-  if (!sourceMetadata.isFile()) {
-    throw new PluginBootstrapError(
-      `Plugin contains a non-regular file: ${source}`,
-    );
-  }
-  await copyFile(source, destination, constants.COPYFILE_EXCL);
-}
-
-interface ZipEntry {
-  localHeaderOffset: number;
-  normalized: string;
-  streamName: string;
-  crc32: number;
-  directory: boolean;
-  uncompressedSize: number;
-}
-
-async function inspectZipFile(
-  path: string,
-  signal?: AbortSignal,
-): Promise<ZipEntry[]> {
-  throwIfSignalAborted(signal);
-  const handle = await open(path, "r");
-  try {
-    const metadata = await handle.stat();
-    if (!metadata.isFile() || metadata.size < 22) {
-      throw new Error("missing end of central directory");
-    }
-    const tailSize = Math.min(metadata.size, 65_557);
-    const tail = await readExactly(
-      handle,
-      tailSize,
-      metadata.size - tailSize,
-      signal,
-    );
-    const view = new DataView(tail.buffer, tail.byteOffset, tail.byteLength);
-    const eocd = findEndOfCentralDirectory(view);
-    const commentLength = view.getUint16(eocd + 20, true);
-    if (eocd + 22 + commentLength !== tail.byteLength) {
-      throw new Error("invalid end of central directory");
-    }
-    const disk = view.getUint16(eocd + 4, true);
-    const centralDisk = view.getUint16(eocd + 6, true);
-    const diskEntries = view.getUint16(eocd + 8, true);
-    const entries = view.getUint16(eocd + 10, true);
-    const centralSize = view.getUint32(eocd + 12, true);
-    const centralOffset = view.getUint32(eocd + 16, true);
-    if (
-      disk !== 0 ||
-      centralDisk !== 0 ||
-      diskEntries !== entries ||
-      entries === 0xffff ||
-      centralSize === 0xffffffff ||
-      centralOffset === 0xffffffff
-    ) {
-      throw new Error("unsupported multi-disk or ZIP64 archive");
-    }
-    if (entries > MAX_ZIP_ENTRIES) {
-      throw new PluginBootstrapError(
-        `Plugin ZIP contains too many entries: ${entries}.`,
-      );
-    }
-    if (centralSize > MAX_ZIP_CENTRAL_DIRECTORY) {
-      throw new PluginBootstrapError(
-        "Plugin ZIP central directory exceeds the safety limit.",
-      );
-    }
-    const eocdOffset = metadata.size - tailSize + eocd;
-    if (centralOffset + centralSize > eocdOffset) {
-      throw new Error("invalid central directory bounds");
-    }
-    const central = await readExactly(
-      handle,
-      centralSize,
-      centralOffset,
-      signal,
-    );
-    return inspectCentralDirectory(central, entries, centralOffset);
-  } finally {
-    await handle.close();
-  }
-}
-
-async function readExactly(
-  handle: Awaited<ReturnType<typeof open>>,
-  length: number,
-  position: number,
-  signal?: AbortSignal,
-): Promise<Buffer> {
-  const buffer = Buffer.alloc(length);
-  let offset = 0;
-  while (offset < length) {
-    throwIfSignalAborted(signal);
-    const { bytesRead } = await handle.read(
-      buffer,
-      offset,
-      length - offset,
-      position + offset,
-    );
-    if (bytesRead === 0) throw new Error("unexpected end of ZIP archive");
-    offset += bytesRead;
-  }
-  return buffer;
-}
-
-function inspectCentralDirectory(
-  data: Uint8Array,
-  entries: number,
-  centralOffset: number,
-): ZipEntry[] {
-  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-  let offset = 0;
-  const result = new Map<string, ZipEntry>();
-  const localHeaderOffsets = new Set<number>();
-  let expandedSize = 0;
-  for (let index = 0; index < entries; index += 1) {
-    if (
-      offset + 46 > view.byteLength ||
-      view.getUint32(offset, true) !== 0x02014b50
-    ) {
-      throw new Error("invalid central directory");
-    }
-    const nameLength = view.getUint16(offset + 28, true);
-    const extraLength = view.getUint16(offset + 30, true);
-    const commentLength = view.getUint16(offset + 32, true);
-    const flags = view.getUint16(offset + 8, true);
-    const compression = view.getUint16(offset + 10, true);
-    const crc32 = view.getUint32(offset + 16, true);
-    const uncompressedSize = view.getUint32(offset + 24, true);
-    const externalAttributes = view.getUint32(offset + 38, true);
-    const localHeaderOffset = view.getUint32(offset + 42, true);
-    const nameStart = offset + 46;
-    const nameEnd = nameStart + nameLength;
-    if (nameEnd > view.byteLength)
-      throw new Error("invalid central directory name");
-    const nameBytes = data.subarray(nameStart, nameEnd);
-    const utf8Name = (flags & 0x800) !== 0;
-    const name = decodeZipName(nameBytes, utf8Name);
-    const streamName = utf8Name
-      ? name
-      : Buffer.from(nameBytes).toString("latin1");
-    const normalized = safeArchivePath(name);
-    if ((flags & 0x1) !== 0 || (compression !== 0 && compression !== 8)) {
-      throw new PluginBootstrapError(
-        `Plugin ZIP uses unsupported encryption or compression: ${name}`,
-      );
-    }
-    const unixMode = externalAttributes >>> 16;
-    if ((unixMode & 0xf000) === 0xa000) {
-      throw new PluginBootstrapError(
-        `Plugin ZIP contains an unsafe path: ${name}`,
-      );
-    }
-    if (result.has(normalized)) {
-      throw new PluginBootstrapError(
-        `Plugin ZIP contains a duplicate path: ${name}`,
-      );
-    }
-    if (
-      localHeaderOffset >= centralOffset ||
-      localHeaderOffsets.has(localHeaderOffset)
-    ) {
-      throw new Error("invalid local header offset");
-    }
-    localHeaderOffsets.add(localHeaderOffset);
-    if (uncompressedSize > MAX_ZIP_ENTRY_SIZE) {
-      throw new PluginBootstrapError(
-        `Plugin ZIP entry exceeds the safety limit: ${name}`,
-      );
-    }
-    expandedSize += uncompressedSize;
-    if (expandedSize > MAX_ZIP_EXPANDED_SIZE) {
-      throw new PluginBootstrapError(
-        "Plugin ZIP expanded size exceeds the safety limit.",
-      );
-    }
-    result.set(normalized, {
-      localHeaderOffset,
-      normalized,
-      streamName,
-      crc32,
-      directory: name.endsWith("/") || (unixMode & 0xf000) === 0x4000,
-      uncompressedSize,
-    });
-    offset = nameEnd + extraLength + commentLength;
-  }
-  if (offset !== data.byteLength) {
-    throw new Error("invalid central directory size");
-  }
-  return [...result.values()].sort(
-    (left, right) => left.localHeaderOffset - right.localHeaderOffset,
-  );
-}
-
-async function streamZipEntries(
-  archivePath: string,
-  destination: string,
-  inspected: readonly ZipEntry[],
-  signal?: AbortSignal,
-): Promise<void> {
-  const setups: Promise<void>[] = [];
-  const completions: Promise<void>[] = [];
-  const pendingWrites: Promise<void>[] = [];
-  const cancelers: Array<(error: unknown) => void> = [];
-  const seen = new Set<string>();
-  let entryIndex = 0;
-  let callbackFailure: unknown;
-  const unzip = new Unzip((file) => {
-    try {
-      const metadata = inspected[entryIndex++];
-      if (metadata === undefined || file.name !== metadata.streamName) {
-        throw new PluginBootstrapError(
-          `Plugin ZIP contains an unindexed path: ${file.name}`,
-        );
-      }
-      const normalized = metadata.normalized;
-      if (seen.has(normalized)) {
-        throw new PluginBootstrapError(
-          `Plugin ZIP contains a duplicate path: ${file.name}`,
-        );
-      }
-      seen.add(normalized);
-      const extraction = createZipEntryExtraction(
-        file,
-        join(destination, ...normalized.split("/")),
-        metadata,
-        pendingWrites,
-        signal,
-      );
-      setups.push(extraction.setup);
-      completions.push(extraction.completion);
-      cancelers.push(extraction.cancel);
-      void extraction.completion.catch(() => undefined);
-    } catch (error) {
-      callbackFailure = error;
-      file.terminate();
-    }
-  });
-  unzip.register(UnzipInflate);
-  let setupIndex = 0;
-  const input = createReadStream(archivePath, {
-    highWaterMark: 64 * 1024,
-    signal,
-  });
-  try {
-    for await (const chunk of input) {
-      throwIfSignalAborted(signal);
-      if (callbackFailure !== undefined) throw callbackFailure;
-      unzip.push(chunk, false);
-      await Promise.all(setups.slice(setupIndex));
-      setupIndex = setups.length;
-      await drainPendingWrites(pendingWrites);
-    }
-    unzip.push(new Uint8Array(), true);
-    await Promise.all(setups.slice(setupIndex));
-    await drainPendingWrites(pendingWrites);
-    if (callbackFailure !== undefined) throw callbackFailure;
-    await Promise.all(completions);
-    if (seen.size !== inspected.length) {
-      throw new PluginBootstrapError(
-        "Plugin ZIP central directory does not match its file entries.",
-      );
-    }
-  } catch (error) {
-    input.destroy();
-    for (const cancel of cancelers) cancel(error);
-    await Promise.allSettled([...setups, ...completions, ...pendingWrites]);
-    throwIfSignalAborted(signal);
-    throw error;
-  }
-}
-
-function createZipEntryExtraction(
-  file: UnzipFile,
-  target: string,
-  metadata: ZipEntry,
-  pendingWrites: Promise<void>[],
-  signal?: AbortSignal,
-): {
-  setup: Promise<void>;
-  completion: Promise<void>;
-  cancel: (error: unknown) => void;
-} {
-  let resolveCompletion!: () => void;
-  let rejectCompletion!: (error: unknown) => void;
-  const completion = new Promise<void>((resolvePromise, reject) => {
-    resolveCompletion = resolvePromise;
-    rejectCompletion = reject;
-  });
-  let settled = false;
-  let handle: Awaited<ReturnType<typeof open>> | null = null;
-  let writeChain = Promise.resolve();
-  let written = 0;
-  let crc32 = 0xffffffff;
-  const closeHandle = async (): Promise<void> => {
-    const current = handle;
-    handle = null;
-    if (current !== null) await current.close();
-  };
-  const removeAbortListener = (): void =>
-    signal?.removeEventListener("abort", onAbort);
-
-  const fail = (error: unknown): void => {
-    if (settled) return;
-    settled = true;
-    removeAbortListener();
-    file.terminate();
-    const close = writeChain.catch(() => undefined).then(closeHandle);
-    pendingWrites.push(close);
-    void close.then(
-      () => rejectCompletion(error),
-      () => rejectCompletion(error),
-    );
-  };
-  const onAbort = (): void => fail(abortReason(signal!));
-  if (signal?.aborted) fail(abortReason(signal));
-  else signal?.addEventListener("abort", onAbort, { once: true });
-
-  const setup = (async () => {
-    if (settled) return;
-    if (
-      file.originalSize !== undefined &&
-      file.originalSize !== metadata.uncompressedSize
-    ) {
-      throw new PluginBootstrapError(
-        `Plugin ZIP entry size does not match its index: ${file.name}`,
-      );
-    }
-    if (metadata.directory) {
-      await mkdir(target, { recursive: true, mode: 0o700 });
-      if (settled) return;
-      file.ondata = (error, data, final) => {
-        if (error !== null) return fail(error);
-        crc32 = updateCrc32(crc32, data);
-        if (data.length > 0) {
-          return fail(
-            new PluginBootstrapError(
-              `Plugin ZIP directory contains data: ${file.name}`,
-            ),
-          );
-        }
-        if (final && !settled) {
-          if ((crc32 ^ 0xffffffff) >>> 0 !== metadata.crc32) {
-            return fail(
-              new PluginBootstrapError(
-                `Plugin ZIP entry failed CRC-32 validation: ${file.name}`,
-              ),
-            );
-          }
-          settled = true;
-          removeAbortListener();
-          resolveCompletion();
-        }
-      };
-      file.start();
-      return;
-    }
-
-    await mkdir(dirname(target), { recursive: true, mode: 0o700 });
-    if (settled) return;
-    const opened = await open(target, "wx", 0o600);
-    if (settled) {
-      await opened.close();
-      return;
-    }
-    handle = opened;
-    file.ondata = (error, data, final) => {
-      if (error !== null) return fail(error);
-      if (settled) return;
-      written += data.length;
-      crc32 = updateCrc32(crc32, data);
-      if (written > metadata.uncompressedSize || written > MAX_ZIP_ENTRY_SIZE) {
-        return fail(
-          new PluginBootstrapError(
-            `Plugin ZIP entry exceeds its declared size: ${file.name}`,
-          ),
-        );
-      }
-      writeChain = writeChain.then(async () => {
-        if (data.length > 0) await writeAll(handle!, data);
-      });
-      pendingWrites.push(writeChain);
-      if (final) {
-        const finish = writeChain.then(async () => {
-          if (written !== metadata.uncompressedSize) {
-            throw new PluginBootstrapError(
-              `Plugin ZIP entry size does not match its index: ${file.name}`,
-            );
-          }
-          if ((crc32 ^ 0xffffffff) >>> 0 !== metadata.crc32) {
-            throw new PluginBootstrapError(
-              `Plugin ZIP entry failed CRC-32 validation: ${file.name}`,
-            );
-          }
-          await closeHandle();
-          if (!settled) {
-            settled = true;
-            removeAbortListener();
-            resolveCompletion();
-          }
-        });
-        pendingWrites.push(finish);
-        void finish.catch(fail);
-      }
-    };
-    file.start();
-  })();
-  void setup.catch(fail);
-  return { setup, completion, cancel: fail };
-}
-
-async function writeAll(
-  handle: Awaited<ReturnType<typeof open>>,
-  data: Uint8Array,
-): Promise<void> {
-  let offset = 0;
-  while (offset < data.length) {
-    const { bytesWritten } = await handle.write(
-      data,
-      offset,
-      data.length - offset,
-    );
-    if (bytesWritten === 0) {
-      throw new PluginBootstrapError(
-        "Plugin ZIP extraction stopped before a complete entry was written.",
-      );
-    }
-    offset += bytesWritten;
-  }
-}
-
-async function drainPendingWrites(writes: Promise<void>[]): Promise<void> {
-  while (writes.length > 0) await Promise.all(writes.splice(0));
-}
-
-function updateCrc32(crc: number, data: Uint8Array): number {
-  let value = crc;
-  for (const byte of data) {
-    value = CRC32_TABLE[(value ^ byte) & 0xff]! ^ (value >>> 8);
-  }
-  return value >>> 0;
-}
-
-function findEndOfCentralDirectory(view: DataView): number {
-  const minimum = Math.max(0, view.byteLength - 65_557);
-  for (let offset = view.byteLength - 22; offset >= minimum; offset -= 1) {
-    if (view.getUint32(offset, true) === 0x06054b50) return offset;
-  }
-  throw new Error("missing end of central directory");
-}
-
 function safeArchivePath(value: string): string {
   const parts = value.split("/");
   const normalized = parts
@@ -1337,51 +1247,53 @@ async function requirePython(
   candidate: string,
   source: string,
   environment: ProcessEnvironment,
+  protectedRoot: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  const resolved = await usablePython(candidate, environment, signal);
+  const resolved = await usablePython(
+    candidate,
+    environment,
+    protectedRoot,
+    signal,
+  );
   if (resolved !== null) return resolved;
   throw new PluginPythonUnavailableError(
     `The ${source} interpreter is unavailable or unusable: ${candidate}. ` +
-      "The unchanged Codex Security plugin requires Python for scan execution.",
+      "The bundled Codex Security plugin requires Python 3.10 or later for scan execution; Python 3.10 also requires tomli.",
   );
 }
 
 async function usablePython(
   candidate: string,
   environment: ProcessEnvironment = process.env,
+  protectedRoot: string = process.cwd(),
   signal?: AbortSignal,
 ): Promise<string | null> {
-  let executable = candidate;
-  if (isPythonPathCandidate(candidate)) {
-    try {
-      executable = resolve(expandHome(candidate));
-      await access(
-        executable,
-        process.platform === "win32" ? constants.F_OK : constants.X_OK,
-      );
-      executable = await realpath(executable);
-    } catch (error) {
-      if (signal?.aborted) throw signal.reason ?? error;
-      return null;
-    }
-  }
+  const command = await resolveTrustedExecutable(
+    isPythonPathCandidate(candidate) ? expandHome(candidate) : candidate,
+    environment,
+    protectedRoot,
+  );
+  if (command === null) return null;
   try {
     const { stdout } = await execFile(
-      executable,
+      command.executable,
       [
+        "-I",
         "-c",
         "import importlib.util,sys\nif sys.version_info < (3, 10): raise SystemExit(1)\nif sys.version_info < (3, 11) and importlib.util.find_spec('tomli') is None: raise SystemExit(1)\nprint('codex-security-python-ok')",
       ],
       {
-        env: environment,
+        env: command.environment,
         encoding: "utf8",
         timeout: 5_000,
         windowsHide: true,
         signal,
       },
     );
-    return stdout.trim() === "codex-security-python-ok" ? executable : null;
+    return stdout.trim() === "codex-security-python-ok"
+      ? command.executable
+      : null;
   } catch (error) {
     if (signal?.aborted) throw error;
     return null;
@@ -1424,7 +1336,7 @@ async function sameFile(left: string, right: string): Promise<boolean> {
   }
 }
 
-function expandHome(value: string): string {
+export function expandHome(value: string): string {
   if (value === "~") return homedir();
   if (value.startsWith("~/") || value.startsWith("~\\")) {
     return join(homedir(), value.slice(2));
@@ -1458,19 +1370,6 @@ function nodeErrorCode(error: unknown): string | undefined {
   return isRecord(error) && typeof error["code"] === "string"
     ? error["code"]
     : undefined;
-}
-
-const CP437_EXTENDED =
-  "ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ ";
-
-function decodeZipName(bytes: Uint8Array, utf8: boolean): string {
-  if (utf8) return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  let decoded = "";
-  for (const byte of bytes) {
-    decoded +=
-      byte < 0x80 ? String.fromCharCode(byte) : CP437_EXTENDED[byte - 0x80]!;
-  }
-  return decoded;
 }
 
 function abortReason(signal: AbortSignal): unknown {

@@ -1,271 +1,289 @@
-export interface ContractObject {
-  [key: string]: unknown;
-}
+/* Generated from the plugin JSON Schemas. Run `pnpm generate:models`. */
 
-export type TargetKind =
-  | "git_revision"
-  | "git_worktree"
-  | "git_diff"
-  | "directory_snapshot";
-
-export interface ScanTargetRecord extends ContractObject {
-  kind: TargetKind;
-  targetId: string;
-  displayName: string;
-  remote?: string;
-  revision?: string;
-  baseRevision?: string;
-  headRevision?: string;
-  snapshotDigest?: string;
-}
-
-export interface ScanScope extends ContractObject {
-  includePaths: string[];
-  excludePaths: string[];
-  summary?: string;
-  artifactsReviewed?: string[];
-  runtimeStatus?: string;
-  validationMode?: string;
-  context?: string;
-  limitations?: string[];
-}
-
-export interface ThreatModel extends ContractObject {
-  summary: string;
-  assets?: string[];
-  trustBoundaries?: string[];
-  attackerCapabilities?: string[];
-  securityObjectives?: string[];
-  assumptions?: string[];
-}
-
-export interface ScanHardening extends ContractObject {
-  portfolioPath: "hardening/hardening.md";
-}
-
-export interface ScanArtifact extends ContractObject {
-  path: string;
-  sha256: string;
-  mediaType: string;
-}
-
-export interface ScanProducer extends ContractObject {
-  name: string;
-  version: string;
-}
-
-export interface ScanRecord extends ContractObject {
-  id: string;
-  producer: ScanProducer;
-  status: "completed";
-  startedAt: string;
-  completedAt: string;
-  sealedAt: string;
-  target: ScanTargetRecord;
-  scope: ScanScope;
-  threatModel?: ThreatModel;
-  hardening?: ScanHardening;
-  coverageRef: "coverage.json";
-  findingsRef: "findings.json";
-  artifacts: ScanArtifact[];
-}
-
-export interface ScanManifest extends ContractObject {
+export interface ScanManifest {
   documentType: "codex-security.scan-manifest";
   schemaVersion: "1.0";
-  scan: ScanRecord;
+  scan: {
+    id: string;
+    producer: {
+      name: string;
+      version: string;
+      [k: string]: unknown;
+    };
+    status: "completed";
+    startedAt: string;
+    completedAt: string;
+    sealedAt: string;
+    target: {
+      kind: "git_revision" | "git_worktree" | "git_diff" | "directory_snapshot";
+      targetId: string;
+      displayName: string;
+      remote?: string;
+      revision?: string;
+      baseRevision?: string;
+      headRevision?: string;
+      snapshotDigest?: string;
+      [k: string]: unknown;
+    };
+    scope: {
+      includePaths: string[];
+      excludePaths: string[];
+      summary?: string;
+      artifactsReviewed?: string[];
+      runtimeStatus?: string;
+      validationMode?: string;
+      context?: string;
+      limitations?: string[];
+      [k: string]: unknown;
+    };
+    threatModel?: {
+      summary: string;
+      assets?: string[];
+      trustBoundaries?: string[];
+      attackerCapabilities?: string[];
+      securityObjectives?: string[];
+      assumptions?: string[];
+      [k: string]: unknown;
+    };
+    hardening?: {
+      portfolioPath: "hardening/hardening.md";
+      [k: string]: unknown;
+    };
+    coverageRef: "coverage.json";
+    findingsRef: "findings.json";
+    /**
+     * @minItems 1
+     */
+    artifacts: {
+      path: string;
+      sha256: string;
+      mediaType: string;
+      [k: string]: unknown;
+    }[];
+    [k: string]: unknown;
+  };
+  [k: string]: unknown;
 }
 
-export interface FindingIdentity extends ContractObject {
-  anchor: string;
-  instance?: string;
-}
-
-export interface FindingFingerprints extends ContractObject {
-  algorithm: "codex-security/v1";
-  primary: string;
-}
-
-export type SeverityLevel =
-  | "critical"
-  | "high"
-  | "medium"
-  | "low"
-  | "informational";
-
-export interface FindingSeverity extends ContractObject {
-  level: SeverityLevel;
-  score?: number;
-  scoringSystem?: string;
-  vector?: string;
-  rationale?: string;
-  changeConditions?: string;
-}
-
-export type ConfidenceLevel = "high" | "medium" | "low";
-
-export interface FindingConfidence extends ContractObject {
-  level: ConfidenceLevel;
-  rationale: string;
-}
-
-export interface FindingTaxonomy extends ContractObject {
-  category: string;
-  cwe: string[];
-}
-
-export interface FindingLocation extends ContractObject {
-  path: string;
-  startLine: number;
-  endLine?: number;
-  role?: string;
-}
-
-export interface FindingValidation extends ContractObject {
-  summary?: string | null;
-  method?: string | null;
-  evidence?: string | string[] | null;
-  counterEvidence?: string | string[] | null;
-}
-
-export interface AttackPathDataflow extends ContractObject {
-  summary: string;
-  source?: string | null;
-  transformations?: string[] | null;
-  sink?: string | null;
-  outcome?: string | null;
-}
-
-export interface AttackPathReachability extends ContractObject {
-  summary: string;
-  attacker?: string | null;
-  entrypoint?: string | null;
-  preconditions?: string[] | null;
-  outcome?: string | null;
-}
-
-export interface FindingAttackPath extends ContractObject {
-  dataflow?: string | AttackPathDataflow | null;
-  reachability?: string | AttackPathReachability | null;
-}
-
-export interface FindingProvenance extends ContractObject {
-  source: string;
-}
-
-export interface FindingWriteup extends ContractObject {
-  reportPath: string;
-}
-
-export interface FindingCodeEvidence extends ContractObject {
-  id: string;
-  label: string;
-  path: string;
-  startLine: number;
-  endLine?: number;
-  language?: string;
-  role?: string;
-  code: string;
-  explanation: string;
-}
-
-export interface FindingRootCause extends ContractObject {
-  summary: string;
-  evidenceRefs?: string[];
-  code?: string;
-  language?: string;
-}
-
-export interface Finding extends ContractObject {
-  findingId: string;
-  occurrenceId: string;
-  ruleId: string;
-  identity: FindingIdentity;
-  fingerprints: FindingFingerprints;
-  title: string;
-  summary: string;
-  severity: FindingSeverity;
-  confidence: FindingConfidence;
-  taxonomy: FindingTaxonomy;
-  locations: FindingLocation[];
-  remediation: string;
-  writeup?: FindingWriteup;
-  codeEvidence?: FindingCodeEvidence[];
-  rootCause?: string | FindingRootCause;
-  validation?: FindingValidation | null;
-  attackPath?: FindingAttackPath | null;
-  remediationTests?: string[];
-  preventiveControls?: string[];
-  provenance: FindingProvenance;
-  extensions?: Record<string, unknown>;
-}
-
-export interface FindingsDocument extends ContractObject {
+export interface FindingsDocument {
   documentType: "codex-security.findings";
   schemaVersion: "1.0";
   scanId: string;
-  findings: Finding[];
+  findings: {
+    findingId: string;
+    occurrenceId: string;
+    ruleId: string;
+    identity: {
+      anchor: string;
+      instance?: string;
+      [k: string]: unknown;
+    };
+    fingerprints: {
+      algorithm: "codex-security/v1";
+      primary: string;
+      [k: string]: unknown;
+    };
+    title: string;
+    summary: string;
+    severity: {
+      level: "critical" | "high" | "medium" | "low" | "informational";
+      score?: number;
+      scoringSystem?: string;
+      vector?: string;
+      rationale?: string;
+      changeConditions?: string;
+      [k: string]: unknown;
+    };
+    confidence: {
+      level: "high" | "medium" | "low";
+      rationale: string;
+      [k: string]: unknown;
+    };
+    taxonomy: {
+      category: string;
+      cwe: string[];
+      [k: string]: unknown;
+    };
+    /**
+     * @minItems 1
+     */
+    locations: {
+      path: string;
+      startLine: number;
+      endLine?: number;
+      role?: string;
+      [k: string]: unknown;
+    }[];
+    writeup?: {
+      reportPath: string;
+      [k: string]: unknown;
+    };
+    codeEvidence?: {
+      id: string;
+      label: string;
+      path: string;
+      startLine: number;
+      endLine?: number;
+      language?: string;
+      role?: string;
+      code: string;
+      explanation: string;
+      [k: string]: unknown;
+    }[];
+    rootCause?:
+      | {
+          summary: string;
+          evidenceRefs?: string[];
+          code?: string;
+          language?: string;
+          [k: string]: unknown;
+        }
+      | string;
+    remediation: string;
+    validation?: {
+      [k: string]: unknown;
+    } | null;
+    attackPath?: {
+      [k: string]: unknown;
+    } | null;
+    remediationTests?: string[];
+    preventiveControls?: string[];
+    provenance: {
+      source: string;
+      [k: string]: unknown;
+    };
+    extensions?: {
+      candidateId?: string;
+      ledgerRowId?: string;
+      reportId?: string;
+      [k: string]: unknown;
+    };
+    [k: string]: unknown;
+  }[];
+  [k: string]: unknown;
 }
 
-export type CoverageMode =
-  | "repository"
-  | "scoped_path"
-  | "diff"
-  | "commit"
-  | "branch_diff"
-  | "working_tree"
-  | "deep_repository";
-export type CoverageCompleteness = "complete" | "partial" | "unknown";
-export type InventoryStrategy =
-  | "repository"
-  | "scoped_path"
-  | "diff"
-  | "directory"
-  | "custom";
-export type SurfaceDisposition =
-  | "reported"
-  | "no_issue_found"
-  | "rejected"
-  | "not_applicable"
-  | "needs_follow_up";
-
-export interface CoverageSurface extends ContractObject {
-  id: string;
-  label: string;
-  disposition: SurfaceDisposition;
-  receiptRefs: string[];
-  riskArea?: string;
-  notes?: string;
-}
-
-export interface ExplicitExclusion extends ContractObject {
-  pattern: string;
-  reason: string;
-}
-
-export interface DeferredCoverage extends ContractObject {
-  id: string;
-  reason: string;
-  paths?: string[];
-  surfaceIds?: string[];
-}
-
-export interface CoverageOpenQuestion extends ContractObject {
-  question: string;
-  followUpPrompt?: string;
-}
-
-export interface CoverageDocument extends ContractObject {
+export interface CoverageDocument {
   documentType: "codex-security.coverage";
   schemaVersion: "1.0";
   scanId: string;
-  mode: CoverageMode;
-  completeness: CoverageCompleteness;
-  inventoryStrategy: InventoryStrategy;
+  mode:
+    | "repository"
+    | "scoped_path"
+    | "diff"
+    | "commit"
+    | "branch_diff"
+    | "working_tree"
+    | "deep_repository";
+  completeness: "complete" | "partial" | "unknown";
+  inventoryStrategy:
+    | "repository"
+    | "scoped_path"
+    | "diff"
+    | "directory"
+    | "custom";
   includePaths: string[];
   excludePaths: string[];
-  surfaces: CoverageSurface[];
-  explicitExclusions: ExplicitExclusion[];
-  deferred: DeferredCoverage[];
-  openQuestions?: CoverageOpenQuestion[];
+  surfaces: {
+    id: string;
+    label: string;
+    disposition:
+      | "reported"
+      | "no_issue_found"
+      | "rejected"
+      | "not_applicable"
+      | "needs_follow_up";
+    receiptRefs: string[];
+    riskArea?: string;
+    notes?: string;
+    [k: string]: unknown;
+  }[];
+  explicitExclusions: {
+    pattern: string;
+    reason: string;
+    [k: string]: unknown;
+  }[];
+  deferred: {
+    id: string;
+    reason: string;
+    paths?: string[];
+    surfaceIds?: string[];
+    [k: string]: unknown;
+  }[];
+  openQuestions?: {
+    question: string;
+    followUpPrompt?: string;
+    [k: string]: unknown;
+  }[];
+  [k: string]: unknown;
 }
+
+export type ContractObject = Record<string, unknown>;
+
+export type ScanRecord = ScanManifest["scan"];
+
+export type ScanProducer = ScanRecord["producer"];
+
+export type ScanTargetRecord = ScanRecord["target"];
+
+export type TargetKind = ScanTargetRecord["kind"];
+
+export type ScanScope = ScanRecord["scope"];
+
+export type ThreatModel = NonNullable<ScanRecord["threatModel"]>;
+
+export type ScanHardening = NonNullable<ScanRecord["hardening"]>;
+
+export type ScanArtifact = ScanRecord["artifacts"][number];
+
+export type Finding = FindingsDocument["findings"][number];
+
+export type FindingIdentity = Finding["identity"];
+
+export type FindingFingerprints = Finding["fingerprints"];
+
+export type FindingSeverity = Finding["severity"];
+
+export type SeverityLevel = FindingSeverity["level"];
+
+export type FindingConfidence = Finding["confidence"];
+
+export type ConfidenceLevel = FindingConfidence["level"];
+
+export type FindingTaxonomy = Finding["taxonomy"];
+
+export type FindingLocation = Finding["locations"][number];
+
+export type FindingWriteup = NonNullable<Finding["writeup"]>;
+
+export type FindingCodeEvidence = NonNullable<Finding["codeEvidence"]>[number];
+
+export type FindingRootCause = Extract<Finding["rootCause"], object>;
+
+export type FindingValidation = NonNullable<Finding["validation"]>;
+
+export type FindingAttackPath = NonNullable<Finding["attackPath"]>;
+
+export type AttackPathDataflow = ContractObject;
+
+export type AttackPathReachability = ContractObject;
+
+export type FindingProvenance = Finding["provenance"];
+
+export type CoverageMode = CoverageDocument["mode"];
+
+export type CoverageCompleteness = CoverageDocument["completeness"];
+
+export type InventoryStrategy = CoverageDocument["inventoryStrategy"];
+
+export type CoverageSurface = CoverageDocument["surfaces"][number];
+
+export type SurfaceDisposition = CoverageSurface["disposition"];
+
+export type ExplicitExclusion = CoverageDocument["explicitExclusions"][number];
+
+export type DeferredCoverage = CoverageDocument["deferred"][number];
+
+export type CoverageOpenQuestion = NonNullable<
+  CoverageDocument["openQuestions"]
+>[number];

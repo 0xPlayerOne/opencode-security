@@ -4,4 +4,3 @@
 *.md text eol=lf
 *.mjs text eol=lf
 *.ts text eol=lf
-sdk/typescript/compatibility/golden/*.txt text eol=lf

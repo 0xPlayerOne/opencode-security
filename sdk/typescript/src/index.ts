@@ -1,5 +1,10 @@
-export { CodexSecurity, ScanHandle } from "./api.js";
-export type { CodexSecurityMetadata, ScanEvent, ScanOptions } from "./api.js";
+export { CodexSecurity } from "./api.js";
+export type {
+  CodexSecurityMetadata,
+  ScanOptions,
+  ScanPreflight,
+} from "./api.js";
+export type { ScanWorkerPhase, ScanWorkerStatus } from "./worker-progress.js";
 export { CodexLoginHandle } from "./auth.js";
 export type { AccountStatus, LoginResult } from "./auth.js";
 
@@ -11,15 +16,15 @@ export {
   IncompleteScanError,
   InvalidTargetError,
   OutputDirectoryError,
+  OutputInsideProtectedRootError,
   PluginBootstrapError,
   PluginPythonUnavailableError,
   ScanInterruptedError,
-  UnsupportedCodexSdkCapabilityError,
 } from "./errors.js";
+export type { ProtectedScanPathKind } from "./errors.js";
 export {
   DEFAULT_CODEX_CONFIG,
   mergedCodexConfig,
-  NATIVE_V2_CODEX_CONFIG,
   writeCodexConfig,
 } from "./config.js";
 export type { CodexSecurityConfig, JsonObject, JsonValue } from "./config.js";

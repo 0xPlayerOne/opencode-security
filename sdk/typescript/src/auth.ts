@@ -1,9 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { isIP } from "node:net";
-import {
-  PluginBootstrapError,
-  UnsupportedCodexSdkCapabilityError,
-} from "./errors.js";
+import { PluginBootstrapError } from "./errors.js";
 import type { CodexCommand, ProcessEnvironment } from "./runtime.js";
 
 export interface LoginResult {
@@ -206,14 +203,8 @@ export async function loginApiKey(
 export async function accountStatus(
   command: CodexCommand,
   environment: ProcessEnvironment,
-  options: { refreshToken?: boolean } = {},
   signal?: AbortSignal,
 ): Promise<AccountStatus> {
-  if (options.refreshToken === true) {
-    throw new UnsupportedCodexSdkCapabilityError(
-      "@openai/codex@0.142.0 does not expose refresh-token account metadata.",
-    );
-  }
   const result = await runCodex(
     command,
     ["login", "status"],

@@ -2,11 +2,21 @@ import { execFile as execFileCallback } from "node:child_process";
 import { existsSync } from "node:fs";
 import { lstat, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { InvalidTargetError } from "./errors.js";
+import { resolveTrustedExecutable } from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
+const UNSUPPORTED_GIT_ENVIRONMENT = new Set([
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_INDEX_FILE",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_COMMON_DIR",
+  "GIT_REPLACE_REF_BASE",
+]);
 
 export type ScanMode = "standard" | "deep";
 export type DiffTargetKind = "refs" | "working_tree";
@@ -116,29 +126,32 @@ export async function enclosingGitWorktreeRoot(
   repository: string,
   signal?: AbortSignal,
 ): Promise<string | null> {
-  let current = repository;
-  let root: string | null = null;
-  while (true) {
-    try {
-      await abortable(() => lstat(join(current, ".git")), signal);
-      root = current;
-    } catch (error) {
-      throwIfAborted(signal);
-      if (
-        typeof error !== "object" ||
-        error === null ||
-        !("code" in error) ||
-        (error.code !== "ENOENT" && error.code !== "ENOTDIR")
-      ) {
-        throw new InvalidTargetError(
-          `Unable to inspect the enclosing Git worktree: ${current}`,
-          { cause: error },
-        );
-      }
-    }
-    const parent = resolve(current, "..");
-    if (parent === current) return root;
-    current = parent;
+  try {
+    const root = await gitOutput(
+      repository,
+      ["rev-parse", "--show-toplevel"],
+      signal,
+    );
+    return await abortable(() => realpath(root), signal);
+  } catch {
+    throwIfAborted(signal);
+    return null;
+  }
+}
+
+export function validatedGitEnvironment(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): void {
+  const unsupported = Object.entries(environment).find(
+    ([name, value]) =>
+      UNSUPPORTED_GIT_ENVIRONMENT.has(name.toUpperCase()) &&
+      value !== undefined &&
+      value.trim() !== "",
+  );
+  if (unsupported !== undefined) {
+    throw new InvalidTargetError(
+      `${unsupported[0]} is not supported for Codex Security scans.`,
+    );
   }
 }
 
@@ -341,12 +354,54 @@ async function gitOutput(
   signal?: AbortSignal,
 ): Promise<string> {
   throwIfAborted(signal);
-  const { stdout } = await execFile("git", args, {
-    cwd: repository,
-    encoding: "utf8",
-    signal,
-  });
+  const command = await resolveTrustedExecutable(
+    "git",
+    isolatedGitEnvironment(),
+    await outermostGitMarkerRoot(repository, signal),
+  );
+  if (command === null)
+    throw new Error("Git is not available on a trusted PATH.");
+  throwIfAborted(signal);
+  const { stdout } = await execFile(
+    command.executable,
+    ["-C", repository, ...args],
+    {
+      encoding: "utf8",
+      signal,
+      env: command.environment,
+    },
+  );
   return stdout.trim();
+}
+
+async function outermostGitMarkerRoot(
+  repository: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  let current = repository;
+  let root = repository;
+  while (true) {
+    throwIfAborted(signal);
+    try {
+      await lstat(join(current, ".git"));
+      root = current;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    const parent = dirname(current);
+    if (parent === current) return root;
+    current = parent;
+  }
+}
+
+function isolatedGitEnvironment(): NodeJS.ProcessEnv {
+  const environment = { ...process.env };
+  for (const name of Object.keys(environment)) {
+    if (name.toUpperCase().startsWith("GIT_")) {
+      delete environment[name];
+    }
+  }
+  return environment;
 }
 
 async function abortable<T>(

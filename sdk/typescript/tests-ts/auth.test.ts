@@ -9,10 +9,7 @@ import {
   logout,
   runCodex,
 } from "../src/auth.js";
-import {
-  PluginBootstrapError,
-  UnsupportedCodexSdkCapabilityError,
-} from "../src/index.js";
+import { PluginBootstrapError } from "../src/index.js";
 import type { CodexCommand } from "../src/index.js";
 
 const temporaryDirectories: string[] = [];
@@ -108,9 +105,6 @@ describe("Codex authentication process boundary", () => {
       details: "Logged in using ChatGPT",
     });
     await expect(logout(command, process.env)).resolves.toBeUndefined();
-    await expect(
-      accountStatus(command, process.env, { refreshToken: true }),
-    ).rejects.toBeInstanceOf(UnsupportedCodexSdkCapabilityError);
   });
 
   test("captures interactive login metadata and completion", async () => {
