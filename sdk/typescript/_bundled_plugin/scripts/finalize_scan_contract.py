@@ -1962,9 +1962,12 @@ def _write_sarif_projection_if_possible(
 ) -> None:
     try:
         write_sarif_projection(scan_dir, source_root, schema_dir)
-    except (ContractError, OSError):
-        # SARIF is a downstream projection. Call the strict writer directly when it is required.
-        pass
+    except (ContractError, OSError) as error:
+        print(
+            f"codex-security: warning: automatic SARIF export failed: {error}. "
+            "Run `codex-security export <scan-dir> --export-format sarif` to retry.",
+            file=sys.stderr,
+        )
 
 
 PreparedScanFinalization = tuple[

@@ -37,6 +37,7 @@ import {
   workerStatusFromEvent,
   type ScanWorkerStatus,
 } from "./worker-progress.js";
+import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "./version.js";
 import {
   bootstrapPlugin,
   cleanupSdkDirectory,
@@ -107,8 +108,16 @@ export interface ScanOptions {
   onScanStarted?: () => void;
   onReconnect?: (attempt: number, maxAttempts: number) => void;
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
+  onObserverError?: (observer: ScanObserverName, error: unknown) => void;
   signal?: AbortSignal;
 }
+
+type ScanObserverName =
+  | "onOutputArchived"
+  | "onOutputDirReady"
+  | "onScanStarted"
+  | "onReconnect"
+  | "onWorkerStatus";
 
 export interface ScanPreflight {
   repository: string;
@@ -124,9 +133,9 @@ interface LocalScanInputs extends ScanPreflight {
 
 export interface CodexSecurityMetadata {
   sdk: "@openai/codex-sdk";
-  sdkVersion: "0.144.6";
+  sdkVersion: string;
   executable: "@openai/codex";
-  executableVersion: "0.144.6";
+  executableVersion: string;
 }
 
 interface ClientDependencies {
@@ -153,9 +162,9 @@ export class CodexSecurity {
   public readonly config: Readonly<CodexSecurityConfig>;
   public readonly metadata: CodexSecurityMetadata = {
     sdk: "@openai/codex-sdk",
-    sdkVersion: "0.144.6",
+    sdkVersion: CODEX_SDK_VERSION,
     executable: "@openai/codex",
-    executableVersion: "0.144.6",
+    executableVersion: CODEX_EXECUTABLE_VERSION,
   };
 
   readonly #dependencies: ClientDependencies;
@@ -294,11 +303,22 @@ export class CodexSecurity {
         temporaryRoot,
         (path) => requireOutputOutsideRepository(protectedRoot, path),
         options.archiveExisting,
-        options.onOutputArchived,
+        (archiveDir) =>
+          notifyObserver(
+            "onOutputArchived",
+            options.onOutputArchived,
+            options.onObserverError,
+            archiveDir,
+          ),
       );
       requireOutputOutsideRepository(protectedRoot, scanDir);
       requireModelSafeOutputDir(scanDir);
-      options.onOutputDirReady?.(scanDir);
+      notifyObserver(
+        "onOutputDirReady",
+        options.onOutputDirReady,
+        options.onObserverError,
+        scanDir,
+      );
       checkOpen();
 
       const shellPluginRoot = runtime.plugin.pluginRoot;
@@ -334,7 +354,6 @@ export class CodexSecurity {
         pluginVersion: runtime.plugin.version,
       };
       checkOpen();
-
       targetPathsFile =
         normalized.kind === "paths"
           ? join(
@@ -434,6 +453,7 @@ export class CodexSecurity {
         onScanStarted: options.onScanStarted,
         onReconnect: options.onReconnect,
         onWorkerStatus: options.onWorkerStatus,
+        onObserverError: options.onObserverError,
       });
     } catch (error) {
       if (this.#closed) this.#requireOpen();
@@ -787,6 +807,7 @@ interface ScanEventRunOptions {
   onScanStarted?: () => void;
   onReconnect?: (attempt: number, maxAttempts: number) => void;
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
+  onObserverError?: (observer: ScanObserverName, error: unknown) => void;
 }
 
 export async function runScanEvents(
@@ -801,13 +822,24 @@ export async function runScanEvents(
   try {
     for await (const event of options.events) {
       const workerStatus = workerStatusFromEvent(event);
-      if (workerStatus !== null) options.onWorkerStatus?.(workerStatus);
+      if (workerStatus !== null) {
+        notifyObserver(
+          "onWorkerStatus",
+          options.onWorkerStatus,
+          options.onObserverError,
+          workerStatus,
+        );
+      }
       if (event.type === "thread.started") {
         const startedThreadId = event["thread_id"];
         if (typeof startedThreadId === "string") threadId = startedThreadId;
         if (!scanStarted) {
           scanStarted = true;
-          options.onScanStarted?.();
+          notifyObserver(
+            "onScanStarted",
+            options.onScanStarted,
+            options.onObserverError,
+          );
         }
       } else if (
         event.type === "item.completed" &&
@@ -833,7 +865,12 @@ export async function runScanEvents(
         const reconnect = reconnectAttempt(message);
         if (reconnect === null) throw new CodexSecurityError(message);
         lastStreamError = message;
-        options.onReconnect?.(...reconnect);
+        notifyObserver(
+          "onReconnect",
+          options.onReconnect,
+          options.onObserverError,
+          ...reconnect,
+        );
       }
     }
     if (options.signal.aborted) {
@@ -987,6 +1024,20 @@ async function collectResult(
     turnResult,
     sarifPath,
   });
+}
+
+function notifyObserver<Arguments extends unknown[]>(
+  observerName: ScanObserverName,
+  observer: ((...args: Arguments) => void) | undefined,
+  onObserverError:
+    | ((observer: ScanObserverName, error: unknown) => void)
+    | undefined,
+  ...args: Arguments
+): void {
+  void Promise.resolve()
+    .then(() => observer?.(...args))
+    .catch((error: unknown) => onObserverError?.(observerName, error))
+    .catch(() => {});
 }
 
 function environmentApiKey(environment: ProcessEnvironment): string | null {

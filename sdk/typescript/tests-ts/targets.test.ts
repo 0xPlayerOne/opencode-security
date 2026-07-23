@@ -352,7 +352,7 @@ describe("scan target normalization", () => {
   test("keeps repeated home separators anchored under the home directory", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-home-"));
     temporaryDirectories.push(root);
-    const project = join(root, "project");
+    const project = join(await realpath(root), "project");
     await mkdir(project);
     const script = `
       const { normalizeRepository } = await import(process.argv[1]);

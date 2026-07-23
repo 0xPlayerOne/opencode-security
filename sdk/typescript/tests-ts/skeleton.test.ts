@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { describe, expect, test } from "bun:test";
 import { CodexSecurity, CodexSecurityError, VERSION } from "../src/index.js";
 import type {
@@ -51,13 +52,16 @@ describe("TypeScript package skeleton", () => {
   });
 
   test("exports the async client and curated error base", async () => {
+    const packageJson = JSON.parse(
+      await readFile(new URL("../package.json", import.meta.url), "utf8"),
+    );
     const client = new CodexSecurity({ pluginPath: "/tmp/plugin" });
     expect(client.config.pluginPath).toBe("/tmp/plugin");
     expect(client.metadata).toEqual({
       sdk: "@openai/codex-sdk",
-      sdkVersion: "0.144.6",
+      sdkVersion: packageJson.dependencies["@openai/codex-sdk"],
       executable: "@openai/codex",
-      executableVersion: "0.144.6",
+      executableVersion: packageJson.dependencies["@openai/codex"],
     });
     expect(new CodexSecurityError("failure").name).toBe("CodexSecurityError");
     await client.close();

@@ -248,33 +248,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     });
     const forwarded =
       arguments_.output === "-" && output !== undefined
-        ? pipeline(
-            invocation.stdout,
-            output instanceof NodeWritable
-              ? output
-              : new NodeWritable({
-                  write(chunk, _encoding, callback) {
-                    try {
-                      if (output.write(chunk)) {
-                        callback();
-                      } else {
-                        callback(
-                          new CodexSecurityError(
-                            "The export stdout stream cannot report backpressure safely.",
-                          ),
-                        );
-                      }
-                    } catch (error) {
-                      callback(
-                        error instanceof Error
-                          ? error
-                          : new Error(String(error)),
-                      );
-                    }
-                  },
-                }),
-            { end: false },
-          )
+        ? writeCliOutput(output, invocation.stdout)
         : Promise.resolve(invocation.stdout.resume());
     let status: number;
     try {
@@ -302,6 +276,47 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     return undefined;
   },
 };
+
+async function writeCliOutput(
+  output: Writable,
+  value: string | Uint8Array | AsyncIterable<Uint8Array>,
+): Promise<void> {
+  const destination = new NodeWritable({
+    write(chunk, _encoding, callback) {
+      try {
+        if (output instanceof NodeWritable) {
+          output.write(chunk, callback);
+        } else if (output.write(chunk)) {
+          callback();
+        } else {
+          callback(
+            new CodexSecurityError(
+              "The export stdout stream cannot report backpressure safely.",
+            ),
+          );
+        }
+      } catch (error) {
+        callback(error instanceof Error ? error : new Error(String(error)));
+      }
+    },
+  });
+  const forwardError = (error: Error): void => {
+    destination.destroy(error);
+  };
+  if (output instanceof NodeWritable) output.once("error", forwardError);
+  try {
+    await pipeline(
+      typeof value === "string" || value instanceof Uint8Array
+        ? [value]
+        : value,
+      destination,
+    );
+  } finally {
+    if (output instanceof NodeWritable) {
+      output.removeListener("error", forwardError);
+    }
+  }
+}
 
 export function exportEnvironment(
   environment: NodeJS.ProcessEnv = process.env,
@@ -730,8 +745,14 @@ export async function main(
     );
     return 2;
   }
-  output.write(frameworkOutput);
-  return exitCode;
+  if (frameworkOutput.length === 0) return exitCode;
+  try {
+    await writeCliOutput(output, frameworkOutput);
+    return exitCode;
+  } catch (error) {
+    errorOutput.write(`codex-security: ${cliErrorMessage(error)}\n`);
+    return 2;
+  }
 }
 
 function validateCliArguments(
@@ -899,7 +920,16 @@ async function runExport(
         : !isOutsidePath(scanRelativeOutput)
           ? join(canonicalScan, scanRelativeOutput)
           : join(
-              await realpath(dirname(arguments_.output)),
+              await realpath(dirname(arguments_.output)).catch(
+                (error: NodeJS.ErrnoException) => {
+                  if (error.code === "ENOENT") {
+                    throw new CodexSecurityError(
+                      `Export output directory does not exist: ${dirname(arguments_.output)}. Create the directory and retry.`,
+                    );
+                  }
+                  throw error;
+                },
+              ),
               basename(arguments_.output),
             );
     if (arguments_.output !== "-") {
@@ -924,7 +954,9 @@ async function runExport(
       output,
     );
     if (arguments_.output === "-") {
-      if (contents !== undefined) output.write(Buffer.from(contents));
+      if (contents !== undefined) {
+        await writeCliOutput(output, Buffer.from(contents));
+      }
     } else {
       errorOutput.write(
         `${arguments_.format.toUpperCase()}: ${arguments_.output}\n`,
@@ -1034,6 +1066,11 @@ async function runScan(
         progress.stopTimer();
         progress.stage(message);
         progress.startTimer("Running scan");
+      },
+      onObserverError: (observer, error) => {
+        errorOutput.write(
+          `codex-security: warning: ${observer} observer failed: ${cliErrorMessage(error)}\n`,
+        );
       },
     };
     if (arguments_.dryRun) {

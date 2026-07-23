@@ -27,6 +27,7 @@ import {
   InvalidTargetError,
   OutputDirectoryError,
   OutputInsideProtectedRootError,
+  type ScanOptions,
   ScanInterruptedError,
   type ScanWorkerStatus,
 } from "../src/index.js";
@@ -40,6 +41,10 @@ import {
 import { writeCodexConfig } from "../src/config.js";
 import { normalizeTarget } from "../src/targets.js";
 import { INTEGRATION_TARGET, PLUGIN_ROOT } from "./plugin-root.js";
+
+type ScanObserverName = Parameters<
+  NonNullable<ScanOptions["onObserverError"]>
+>[0];
 
 const REPOSITORY_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
@@ -97,6 +102,7 @@ function runEvents(
   onReconnect?: (attempt: number, maxAttempts: number) => void,
   onWorkerStatus?: (status: ScanWorkerStatus) => void,
   onScanStarted?: () => void,
+  onObserverError?: (observer: ScanObserverName, error: unknown) => void,
 ): ReturnType<typeof runScanEvents> {
   return runScanEvents({
     thread: {
@@ -112,6 +118,7 @@ function runEvents(
     onScanStarted,
     onReconnect,
     onWorkerStatus,
+    onObserverError,
     expectation: {
       repository: "/repository",
       repositoryRevision: "deadbeef",
@@ -198,6 +205,7 @@ describe("one-shot scan events", () => {
   test("reports a scan as started only once if thread events are replayed", async () => {
     const scanDir = await copyCompletedScan(await temporaryDirectory());
     let starts = 0;
+    const observerErrors: Array<[ScanObserverName, string]> = [];
 
     async function* replayedEvents(): AsyncGenerator<ThreadEvent> {
       yield { type: "thread.started", thread_id: "thread-1" };
@@ -212,10 +220,17 @@ describe("one-shot scan events", () => {
       undefined,
       () => {
         starts += 1;
+        throw new Error("start observer exploded");
+      },
+      (observer, error) => {
+        observerErrors.push([observer, (error as Error).message]);
       },
     );
 
     expect(starts).toBe(1);
+    expect(observerErrors).toEqual([
+      ["onScanStarted", "start observer exploded"],
+    ]);
   });
 
   test("retains partial output and reports interruption", async () => {
@@ -256,6 +271,46 @@ describe("one-shot scan events", () => {
     });
     expect(reconnects).toEqual([[2, 5]]);
     await expect(stat(scanDir)).resolves.toBeDefined();
+  });
+
+  test("isolates synchronous and asynchronous progress-observer failures", async () => {
+    for (const asynchronous of [false, true]) {
+      const scanDir = await copyCompletedScan(await temporaryDirectory());
+      const observerErrors: Array<[ScanObserverName, string]> = [];
+      async function* reconnectingEvents(): AsyncGenerator<ThreadEvent> {
+        yield { type: "thread.started", thread_id: "thread-1" };
+        yield { type: "error", message: "Reconnecting... 2/5" };
+        yield {
+          type: "turn.completed",
+          usage: {
+            input_tokens: 1,
+            cached_input_tokens: 0,
+            output_tokens: 1,
+            reasoning_output_tokens: 0,
+          },
+        };
+      }
+
+      await expect(
+        runEvents(
+          scanDir,
+          reconnectingEvents(),
+          new AbortController(),
+          () => {
+            const error = new Error("observer exploded");
+            if (asynchronous) return Promise.reject(error);
+            throw error;
+          },
+          undefined,
+          undefined,
+          (observer, error) => {
+            observerErrors.push([observer, (error as Error).message]);
+            if (asynchronous) return Promise.reject(new Error("report failed"));
+          },
+        ),
+      ).resolves.toBeDefined();
+      expect(observerErrors).toEqual([["onReconnect", "observer exploded"]]);
+    }
   });
 
   test("keeps the Codex stream alive through reconnect notifications", async () => {
@@ -827,6 +882,7 @@ describe("CodexSecurity orchestration", () => {
     await mkdir(output, { mode: 0o700 });
     await writeFile(join(output, "previous.txt"), "previous scan\n");
     let archived: string | undefined;
+    const observerErrors: Array<[ScanObserverName, string]> = [];
     const client = new TestClient(
       {},
       {
@@ -851,9 +907,16 @@ describe("CodexSecurity orchestration", () => {
         archiveExisting: true,
         onOutputArchived: (archiveDir) => {
           archived = archiveDir;
+          throw new Error("archive observer exploded");
+        },
+        onObserverError: (observer, error) => {
+          observerErrors.push([observer, (error as Error).message]);
         },
       }),
     ).rejects.toThrow("scan did not start");
+    expect(observerErrors).toEqual([
+      ["onOutputArchived", "archive observer exploded"],
+    ]);
     expect(archived?.startsWith(`${output}.previous-`)).toBe(true);
     expect(await readFile(join(archived!, "previous.txt"), "utf8")).toBe(
       "previous scan\n",

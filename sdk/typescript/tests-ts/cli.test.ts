@@ -872,6 +872,33 @@ describe("CLI", () => {
     }
   });
 
+  test("waits for delayed stdout writes without closing the destination", async () => {
+    let contents = "";
+    const stdout = new Writable({
+      write(chunk, _encoding, callback) {
+        setTimeout(() => {
+          contents += chunk.toString();
+          callback();
+        }, 20);
+      },
+    });
+
+    try {
+      expect(
+        await main(
+          ["export", "scan", "--export-format", "json", "--output", "-"],
+          stdout,
+          capture().stream,
+          dependencies(),
+        ),
+      ).toBe(0);
+      expect(contents).toBe('{"documentType":"codex-security.findings"}\n');
+      expect(stdout.writableEnded).toBe(false);
+    } finally {
+      stdout.destroy();
+    }
+  });
+
   test.skipIf(process.platform === "win32")(
     "streams a large stdout export through a slow destination without buffering or status noise",
     async () => {
@@ -893,9 +920,11 @@ describe("CLI", () => {
       let bytes = 0;
       let writes = 0;
       let drains = 0;
+      let emptyWrites = 0;
       const stdout = new Writable({
         highWaterMark: 32 * 1024,
         write(chunk, _encoding, callback) {
+          if (chunk.length === 0) emptyWrites += 1;
           bytes += chunk.length;
           writes += 1;
           setTimeout(callback, 1);
@@ -926,6 +955,7 @@ describe("CLI", () => {
         expect(bytes).toBe(expectedBytes);
         expect(writes).toBeGreaterThan(1);
         expect(drains).toBeGreaterThan(0);
+        expect(emptyWrites).toBe(0);
         expect(stderr.text()).toBe("");
 
         const lightweight = capture();
@@ -1042,6 +1072,31 @@ describe("CLI", () => {
       }
     } finally {
       await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("explains a missing export-output directory", async () => {
+    const root = await mkdtemp(
+      join(tmpdir(), "codex-security-export-missing-"),
+    );
+    try {
+      const output = join(root, "reports", "results.sarif");
+      const stderr = capture();
+      expect(
+        await main(
+          ["export", "scan", "--output", output],
+          capture().stream,
+          stderr.stream,
+          dependencies(),
+        ),
+      ).toBe(2);
+      expect(stderr.text()).toContain(
+        `Export output directory does not exist: ${join(root, "reports")}`,
+      );
+      expect(stderr.text()).toContain("Create the directory and retry");
+      expect(stderr.text()).not.toContain("ENOENT");
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 
@@ -1758,6 +1813,65 @@ describe("CLI", () => {
     ).toBe(0);
     expect(stdout.text()).toContain("scanDir: /tmp/scan");
     expect(stdout.text()).toContain("completeness: complete");
+  });
+
+  test("reports isolated observer failures without failing the scan", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        options?.onObserverError?.(
+          "onWorkerStatus",
+          new Error(`status observer failed ${SYNTHETIC_CREDENTIALS}`),
+        );
+        return fakeResult();
+      },
+      close: async () => {},
+      preflight: async () => fakePreflight(),
+    });
+
+    expect(
+      await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain(
+      `codex-security: warning: onWorkerStatus observer failed: status observer failed ${REDACTED_CREDENTIALS}`,
+    );
+    expect(stderr.text()).not.toContain("SYNTHETIC_OPENAI_VALUE_123");
+  });
+
+  test("maps failed scan stdout writes to the runtime-error exit code", async () => {
+    const stdout = new Writable({
+      write(_chunk, _encoding, callback) {
+        callback(new Error("SYNTHETIC_SCAN_STDOUT_WRITE_FAILED"));
+      },
+    });
+    const stderr = capture();
+
+    expect(
+      await main(["scan", "--json"], stdout, stderr.stream, dependencies()),
+    ).toBe(2);
+    expect(stderr.text()).toContain("SYNTHETIC_SCAN_STDOUT_WRITE_FAILED");
+  });
+
+  test("maps failed export stdout writes to the runtime-error exit code", async () => {
+    const stdout = new Writable({
+      write(_chunk, _encoding, callback) {
+        callback(new Error("SYNTHETIC_EXPORT_STDOUT_WRITE_FAILED"));
+      },
+    });
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["export", "scan", "--output", "-"],
+        stdout,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("SYNTHETIC_EXPORT_STDOUT_WRITE_FAILED");
   });
 
   test("reports partial worker capacity on stderr without changing JSON stdout", async () => {
