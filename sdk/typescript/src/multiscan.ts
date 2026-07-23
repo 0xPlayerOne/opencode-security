@@ -70,21 +70,6 @@ export interface MultiscanResult {
   resultsPath: string;
 }
 
-export async function inspectMultiscanInventory(
-  inputPath: string,
-  mode: ScanMode = "standard",
-): Promise<{ total: number; repositories: string[] }> {
-  const tasks = parseInventory(
-    await readFile(inputPath, "utf8"),
-    dirname(resolve(inputPath)),
-    mode,
-  );
-  return {
-    total: tasks.length,
-    repositories: tasks.map((task) => task.id),
-  };
-}
-
 export async function runMultiscan(
   options: MultiscanOptions,
 ): Promise<MultiscanResult> {

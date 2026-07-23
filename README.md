@@ -66,17 +66,14 @@ worktree. When SARIF is produced, it is written to
 `<scan-dir>/exports/results.sarif`. Use `npx codex-security scan --help` for all
 target, output, and runtime options.
 
-Run `npx codex-security bulk-scan` in an interactive terminal to discover
-GitHub repositories, review the matches, and confirm before starting a scan.
-The default selection includes private and internal repositories pushed in the
-last 90 days. Select **Something else** to filter by repository-name keywords,
-activity, primary language, and one or more visibility levels. Private and
-internal visibility are selected by default. Private repository checkouts reuse
-your GitHub CLI sign-in without changing your global Git configuration.
-Archived repositories and forks are always excluded. For automation or an
-existing repository list, pass a CSV containing `id`, `repository`, and full
-immutable `revision` columns and specify `--output-dir`. Use
-`npx codex-security bulk-scan --help` for all options.
+Sign in with `gh auth login`, then run `npx codex-security bulk-scan` to discover
+GitHub repositories pushed in the last 90 days. Archived
+repositories and forks are excluded. Optionally filter by comma-separated
+repository-name keywords, review the matches, and confirm before scanning.
+Private checkouts reuse your GitHub CLI sign-in without changing your global Git
+configuration. For automation or an existing repository list, pass a CSV
+containing `id`, `repository`, and full immutable `revision` columns and specify
+`--output-dir`. Use `npx codex-security bulk-scan --help` for all options.
 
 The CLI uses [Incur](https://github.com/wevm/incur) for agent-friendly discovery
 and structured output. Use `--llms` for the command manifest,

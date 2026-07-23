@@ -554,50 +554,6 @@ describe("CLI", () => {
     expect(stdout.text()).toBe("");
   });
 
-  test("starts an existing-CSV bulk scan after interactive confirmation", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-cli-bulk-scan-"));
-    try {
-      await multiscanInventory(root);
-      const stdout = capture();
-      const stderr = capture();
-      const confirmations = [true, true];
-      const answers = ["repositories.csv", "results"];
-      const wizard: NonNullable<MainDependencies["bulkScan"]> = {
-        prompt: {
-          isInteractive: () => true,
-          write: (value) => {
-            stderr.stream.write(value);
-          },
-          confirm: async () => confirmations.shift() ?? false,
-          input: async () => answers.shift() ?? "",
-          select: async (_question, options) => options[0]!.value,
-          multiSelect: async (_question, _options, defaults = []) => [
-            ...defaults,
-          ],
-        },
-        now: () => 0,
-        currentDirectory: () => root,
-        runGitHub: async () => {
-          throw new Error("GitHub should not run for an existing CSV.");
-        },
-      };
-
-      expect(
-        await main(
-          ["bulk-scan"],
-          stdout.stream,
-          stderr.stream,
-          dependencies({ currentDirectory: root, bulkScan: wizard }),
-        ),
-      ).toBe(0);
-      expect(stdout.text()).toContain("completed");
-      expect(stderr.text()).toContain("sample started (attempt 1)");
-      expect(stderr.text()).toContain("sample completed (attempt 1)");
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
   test("exposes only typed, read-only SDK metadata over MCP", () => {
     const child = spawnSync(
       process.execPath,

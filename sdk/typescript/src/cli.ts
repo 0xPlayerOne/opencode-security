@@ -28,7 +28,6 @@ import { Cli, z } from "incur";
 import { parse as parseToml } from "smol-toml";
 import { CodexSecurity, type ScanOptions, type ScanPreflight } from "./api.js";
 import {
-  BulkScanInterruptedError,
   createBulkScanDiscoveryDependencies,
   runBulkScanWizard,
   type BulkScanDiscoveryDependencies,
@@ -757,7 +756,9 @@ export async function main(
         } catch (error) {
           exitCode =
             interruptedExitCode() ??
-            (error instanceof BulkScanInterruptedError ? 130 : 2);
+            (error instanceof Error && error.name === "ExitPromptError"
+              ? 130
+              : 2);
           errorOutput.write(`codex-security: ${cliErrorMessage(error)}\n`);
         } finally {
           dependencies.removeSignalListener("SIGINT", onInterrupt);

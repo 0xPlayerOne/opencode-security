@@ -103,18 +103,13 @@ either setting with repeatable `--codex KEY=VALUE` options, for example
 Run `npx codex-security scan --help` or `npx codex-security bulk-scan --help`
 for the complete CLI references.
 
-Run `npx codex-security bulk-scan` in an interactive terminal to discover
-repositories through an authenticated GitHub CLI. The default selection
-includes private and internal repositories pushed in the last 90 days and
-excludes archived repositories and forks. Select **Something else** to choose
-repository-name keywords, an activity window, a primary language, and
-one or more repository visibility levels. Private and internal repositories
-are selected by default, and multiple name keywords match any of the specified
-terms. Private repository checkouts reuse your GitHub CLI sign-in without
-changing your global Git configuration. Review the matching repositories and
-choose an output directory; scanning starts only after you confirm. The
-selected repositories are recorded in `<output-dir>/repositories.csv` so the
-scan can be reviewed or resumed.
+Sign in with `gh auth login`, then run `npx codex-security bulk-scan` to discover
+GitHub repositories pushed in the last 90 days. Archived
+repositories and forks are excluded. Optionally filter by comma-separated
+repository-name keywords, review the matches, and confirm before scanning.
+Private checkouts reuse your GitHub CLI sign-in without changing your global Git
+configuration. The selected repositories are saved to
+`<output-dir>/repositories.csv` for review or resumption.
 
 To use an existing repository list or run in CI, pass a CSV with required `id`,
 `repository`, and `revision` columns. Revisions must be full commit hashes;

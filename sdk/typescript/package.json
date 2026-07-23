@@ -50,6 +50,8 @@
     "types": "pnpm run generate:models:check && tsc --noEmit"
   },
   "dependencies": {
+    "@inquirer/prompts": "8.3.0",
+    "@octokit/core": "7.0.6",
     "@openai/codex": "0.144.6",
     "@openai/codex-sdk": "0.144.6",
     "ajv": "8.20.0",
