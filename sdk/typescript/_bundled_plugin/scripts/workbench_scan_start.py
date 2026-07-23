@@ -82,14 +82,16 @@ def insert_running_scan(
     scope_file_count: int,
     timestamp: str,
     handoff_status: str = "pending",
+    scan_dir: Path | None = None,
 ) -> str:
     revision = target_identity[0]
-    scan_dir = Path(
-        tempfile.mkdtemp(
-            prefix=f"{safe_segment(revision)}_{compact_timestamp()}_",
-            dir=target_root,
-        )
-    ).resolve()
+    if scan_dir is None:
+        scan_dir = Path(
+            tempfile.mkdtemp(
+                prefix=f"{safe_segment(revision)}_{compact_timestamp()}_",
+                dir=target_root,
+            )
+        ).resolve()
     connection.execute(
         """
         INSERT INTO scans (

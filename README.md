@@ -47,6 +47,11 @@ npx codex-security scan /path/to/repo --output-dir /path/outside/repo/results
 npx codex-security scan /path/to/repo --output-dir /path/outside/repo/results --archive-existing
 npx codex-security scan /path/to/repo --dry-run
 npx codex-security scan /path/to/repo --fail-on-severity high
+npx codex-security scans list /path/to/repo
+npx codex-security scans list --scan-root /path/outside/repo/results
+npx codex-security scans show SCAN_ID
+npx codex-security scans rerun SCAN_ID
+npx codex-security scans compare PREVIOUS_SCAN_ID CURRENT_SCAN_ID
 npx codex-security export /path/outside/repo/results --export-format sarif --output results.sarif
 npx codex-security export /path/outside/repo/results --export-format csv --output findings.csv
 npx codex-security export /path/outside/repo/results --export-format json --output findings.json
@@ -97,6 +102,22 @@ either setting, pass valid TOML values (including quotes for strings):
 ```bash
 npx codex-security scan . --codex 'model="gpt-5.6-sol"' --codex 'model_reasoning_effort="high"'
 ```
+
+## Scan history and reruns
+
+`npx codex-security scans list` lists scans for the current repository. Pass a
+repository path to inspect another checkout, `--scan-root DIR` to filter by
+scan artifact directory. `scans show SCAN_ID` includes saved configuration,
+findings, and coverage.
+
+History is saved in the existing Codex Security workbench database under
+`$CODEX_HOME/state/plugins/codex-security`. Set `CODEX_SECURITY_STATE_DIR` to
+choose a different location.
+
+`scans rerun SCAN_ID` repeats the same configuration against the current
+checkout. `scans compare BEFORE_SCAN_ID AFTER_SCAN_ID` identifies new,
+persisting, reopened, and resolved findings; missing findings remain unknown
+when coverage is incomplete or the original location was not reviewed.
 
 Use `export` to create CSV, JSON, or SARIF from a completed, sealed scan without
 starting Codex or loading credentials. JSON preserves the sealed findings

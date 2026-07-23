@@ -9,7 +9,6 @@ import errno
 import hashlib
 import io
 import json
-import math
 import os
 import re
 import sqlite3
@@ -71,8 +70,6 @@ from workbench_constants import (
     FINDING_TITLE_BYTES,
     FINDINGS_PAGE_MAX,
     FINDINGS_RESULT_LIMIT,
-    MAX_CAPABILITY_PREFLIGHT_INPUT_JSON_BYTES,
-    MAX_CAPABILITY_PREFLIGHT_PERSISTED_JSON_BYTES,
     PATCH_ARTIFACT_MAX_BYTES,
     PATCH_PREVIEW_BYTES,
     SQLITE_RETRY_ATTEMPTS,
@@ -103,6 +100,8 @@ from workbench_target import (
 )
 from workbench_target_state import backfill_security_targets, ensure_security_target
 from workbench_validation import (
+    capability_preflight_input,
+    capability_preflight_json,
     optional_text,
     require_occurrence,
     require_uuid,
@@ -111,6 +110,7 @@ from workbench_validation import (
 FINDING_ARTIFACT_DIRECTORIES_LIMIT = 80
 FINDING_ARTIFACTS_LIMIT = 40
 FINDING_WRITEUP_REPORT_PATH = re.compile(r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$")
+SCAN_RECIPE_MAX_BYTES = 256 * 1024
 
 
 def now() -> str:
@@ -308,217 +308,6 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
     except BaseException:
         connection.rollback()
         raise
-
-
-def reject_nonstandard_json_number(value: str) -> None:
-    raise ValueError(f"invalid JSON number {value}")
-
-
-def capability_preflight_json(
-    value: str | None,
-    *,
-    checked_target_path: str | None,
-    checked_mode: str,
-) -> str | None:
-    normalized = optional_text(value)
-    if normalized is None:
-        return None
-    if len(normalized.encode("utf-8")) > MAX_CAPABILITY_PREFLIGHT_INPUT_JSON_BYTES:
-        raise SystemExit(
-            "Capability preflight must be no larger than "
-            f"{MAX_CAPABILITY_PREFLIGHT_INPUT_JSON_BYTES} bytes."
-        )
-    try:
-        payload = json.loads(normalized, parse_constant=reject_nonstandard_json_number)
-    except (json.JSONDecodeError, ValueError) as exc:
-        raise SystemExit("Capability preflight must be valid JSON.") from exc
-    if not isinstance(payload, dict):
-        raise SystemExit("Capability preflight must be a JSON object.")
-    _require_object_keys(
-        payload,
-        required={"issues", "profile", "status"},
-        optional={"remediation"},
-        label="Capability preflight",
-    )
-    profile = _bounded_preflight_text(payload.get("profile"), 128, "profile")
-    status = payload.get("status")
-    if status not in {"ready", "blocked", "incomplete"}:
-        raise SystemExit("Capability preflight status is invalid.")
-    issues = payload.get("issues")
-    if not isinstance(issues, list) or len(issues) > 32:
-        raise SystemExit("Capability preflight issues must be an array of at most 32 objects.")
-    normalized_issues: list[dict[str, str]] = []
-    for index, issue in enumerate(issues):
-        if not isinstance(issue, dict):
-            raise SystemExit("Capability preflight issues must be an array of at most 32 objects.")
-        label = f"Capability preflight issue {index + 1}"
-        _require_object_keys(
-            issue,
-            required={"capability", "reason", "severity", "status"},
-            optional=set(),
-            label=label,
-        )
-        severity = issue.get("severity")
-        issue_status = issue.get("status")
-        if severity not in {"block", "warn", "suggest"} or issue_status not in {
-            "fail",
-            "unknown",
-        }:
-            raise SystemExit(f"{label} has an invalid severity or status.")
-        normalized_issues.append(
-            {
-                "capability": _bounded_preflight_text(
-                    issue.get("capability"), 128, f"issue {index + 1} capability"
-                ),
-                "reason": _bounded_preflight_text(
-                    issue.get("reason"), 1200, f"issue {index + 1} reason"
-                ),
-                "severity": severity,
-                "status": issue_status,
-            }
-        )
-    remediation = payload.get("remediation")
-    normalized_remediation: dict[str, Any] | None = None
-    if remediation is not None:
-        if not isinstance(remediation, dict):
-            raise SystemExit("Capability preflight remediation must be a JSON object.")
-        _require_object_keys(
-            remediation,
-            required=set(),
-            optional={"note", "patches", "summary"},
-            label="Capability preflight remediation",
-        )
-        normalized_remediation = {}
-        for key, maximum in (("note", 2400), ("summary", 1200)):
-            if key in remediation:
-                normalized_remediation[key] = _bounded_preflight_text(
-                    remediation.get(key), maximum, f"remediation {key}"
-                )
-        if "patches" in remediation:
-            patches = remediation.get("patches")
-            if not isinstance(patches, list) or len(patches) > 32:
-                raise SystemExit(
-                    "Capability preflight remediation patches must be an array of at most 32 objects."
-                )
-            normalized_remediation["patches"] = [
-                _normalize_preflight_patch(patch, index) for index, patch in enumerate(patches)
-            ]
-    has_unknown = any(issue.get("status") == "unknown" for issue in issues)
-    has_blocking_failure = any(
-        issue.get("severity") == "block" and issue.get("status") == "fail" for issue in issues
-    )
-    expected_status = (
-        "blocked" if has_blocking_failure else "incomplete" if has_unknown else "ready"
-    )
-    if status != expected_status:
-        raise SystemExit(
-            f"Capability preflight status must be {expected_status} for the supplied issues."
-        )
-    normalized_payload: dict[str, Any] = {
-        "profile": profile,
-        "status": status,
-        "issues": normalized_issues,
-        "checkedTargetPath": checked_target_path,
-        "checkedMode": checked_mode,
-    }
-    if normalized_remediation is not None:
-        normalized_payload["remediation"] = normalized_remediation
-    serialized = json.dumps(
-        normalized_payload,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    serialized = _escape_json_surrogates(serialized)
-    if len(serialized.encode("utf-8")) > MAX_CAPABILITY_PREFLIGHT_PERSISTED_JSON_BYTES:
-        raise SystemExit(
-            "Persisted capability preflight must be no larger than "
-            f"{MAX_CAPABILITY_PREFLIGHT_PERSISTED_JSON_BYTES} bytes."
-        )
-    return serialized
-
-
-def capability_preflight_input(value: str | None, path: Path | None) -> str | None:
-    if path is None:
-        return value
-    try:
-        if path.stat().st_size > MAX_CAPABILITY_PREFLIGHT_INPUT_JSON_BYTES:
-            raise SystemExit(
-                "Capability preflight must be no larger than "
-                f"{MAX_CAPABILITY_PREFLIGHT_INPUT_JSON_BYTES} bytes."
-            )
-        return path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
-        raise SystemExit("Capability preflight JSON file could not be read as UTF-8.") from exc
-
-
-def _require_object_keys(
-    value: dict[str, Any], *, required: set[str], optional: set[str], label: str
-) -> None:
-    keys = set(value)
-    missing = required - keys
-    extra = keys - required - optional
-    if missing:
-        raise SystemExit(f"{label} is missing required fields: {', '.join(sorted(missing))}.")
-    if extra:
-        raise SystemExit(f"{label} has unsupported fields: {', '.join(sorted(extra))}.")
-
-
-def _bounded_preflight_text(value: Any, maximum: int, label: str) -> str:
-    if not isinstance(value, str):
-        raise SystemExit(f"Capability preflight {label} must be text.")
-    normalized = value.strip()
-    if not normalized or _javascript_string_length(normalized) > maximum:
-        raise SystemExit(f"Capability preflight {label} must contain 1 to {maximum} characters.")
-    return normalized
-
-
-def _javascript_string_length(value: str) -> int:
-    return len(value.encode("utf-16-le", errors="surrogatepass")) // 2
-
-
-def _escape_json_surrogates(value: str) -> str:
-    return "".join(
-        f"\\u{ord(character):04x}" if 0xD800 <= ord(character) <= 0xDFFF else character
-        for character in value
-    )
-
-
-def _normalize_preflight_patch(value: Any, index: int) -> dict[str, Any]:
-    label = f"Capability preflight remediation patch {index + 1}"
-    if not isinstance(value, dict):
-        raise SystemExit(f"{label} must be a JSON object.")
-    _require_object_keys(
-        value,
-        required={"path", "value"},
-        optional={"kind"},
-        label=label,
-    )
-    normalized: dict[str, Any] = {
-        "path": _bounded_preflight_text(value.get("path"), 256, f"patch {index + 1} path")
-    }
-    if "kind" in value:
-        kind = value.get("kind")
-        if kind not in {"config", "host_setting"}:
-            raise SystemExit(f"{label} has an invalid kind.")
-        normalized["kind"] = kind
-    patch_value = value.get("value")
-    if isinstance(patch_value, str):
-        if _javascript_string_length(patch_value) > 2048:
-            raise SystemExit(f"{label} value must be no longer than 2048 characters.")
-    elif isinstance(patch_value, bool):
-        pass
-    elif isinstance(patch_value, (int, float)):
-        try:
-            finite = math.isfinite(float(patch_value))
-        except OverflowError:
-            finite = False
-        if not finite:
-            raise SystemExit(f"{label} value must be a finite number.")
-    else:
-        raise SystemExit(f"{label} value must be text, a number, or a boolean.")
-    normalized["value"] = patch_value
-    return normalized
 
 
 def require_target(value: str) -> Path:
@@ -766,6 +555,15 @@ def stored_diff_target(row: sqlite3.Row) -> dict[str, str] | None:
     return target
 
 
+def requested_scan_paths(scan: sqlite3.Row) -> list[str]:
+    if "recipe_json" in scan.keys() and scan["recipe_json"] is not None:
+        recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
+        target = recipe["target"]
+        if target["kind"] == "paths":
+            return target["paths"]
+    return [scan["scope"]]
+
+
 def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
     target = Path(scan["target_path"])
     target_contract = {
@@ -787,7 +585,11 @@ def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
         "scope": {
             "requiredExcludePaths": [],
             "requestedPath": scan["scope"],
-            **({"requiredIncludePaths": [scan["scope"]]} if scan["mode"] != "diff" else {}),
+            **(
+                {"requiredIncludePaths": requested_scan_paths(scan)}
+                if scan["mode"] != "diff"
+                else {}
+            ),
         },
         "target": target_contract,
     }
@@ -803,7 +605,11 @@ def expected_coverage_mode(scan: sqlite3.Row) -> str:
         if mode is None:
             raise SystemExit("This migrated diff scan does not have a validated change set.")
         return mode
-    if scan["scope"] != ".":
+    if scan["scope"] != "." or (
+        "recipe_json" in scan.keys()
+        and scan["recipe_json"] is not None
+        and json.loads(scan["recipe_json"])["target"]["kind"] == "paths"
+    ):
         return "scoped_path"
     return "deep_repository" if scan["mode"] == "deep" else "repository"
 
@@ -829,7 +635,7 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
             target["snapshotDigest"] = scan["target_snapshot_digest"]
 
     scope: dict[str, Any] = {
-        "includePaths": [scan["scope"]],
+        "includePaths": requested_scan_paths(scan),
         "excludePaths": contract["scope"]["requiredExcludePaths"],
     }
 
@@ -906,7 +712,7 @@ def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None
             "scan-manifest.json scope excludePaths must match the workbench scan scope."
         )
     requested_scope = scan["scope"]
-    if scan["mode"] != "diff" and include_paths != [requested_scope]:
+    if scan["mode"] != "diff" and include_paths != requested_scan_paths(scan):
         raise SystemExit("scan-manifest.json scope must match the workbench scan scope.")
     for include_path in include_paths:
         if not isinstance(include_path, str) or not path_within_scope(
@@ -1648,15 +1454,23 @@ def complete_scan_locked(
         claim_token,
         error_message="Scan completion is owned by another continuation.",
     )
-    deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
+    if scan["recipe_json"] is None:
+        deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
     require_unchanged_target(scan)
     scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
     completion_timestamp = now()
+    completion_binding = workbench_completion_binding(scan, completion_timestamp)
+    if scan["recipe_json"] is not None:
+        manifest = read_json_object(artifact_path(scan_dir, ARTIFACTS["manifest"], required=True))
+        manifest_scan = manifest.get("scan")
+        if isinstance(manifest_scan, dict) and manifest_scan.get("sealedAt") is not None:
+            completion_binding["startedAt"] = manifest_scan.get("startedAt")
+            completion_binding["completedAt"] = manifest_scan.get("completedAt")
     try:
         prepared = _prepare_scan_finalization(
             scan_dir,
             expected_coverage_mode=expected_coverage_mode(scan),
-            completion_binding=workbench_completion_binding(scan, completion_timestamp),
+            completion_binding=completion_binding,
         )
         # Keep the second target check between in-memory finalization and the first write.
         require_unchanged_target(scan)
@@ -1677,7 +1491,8 @@ def complete_scan_locked(
             return scan_context(connection, scan["id"])
         if scan["status"] != "running":
             raise SystemExit("Only a running scan can be completed.")
-        deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
+        if scan["recipe_json"] is None:
+            deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
         handoff.require_current_continuation(
             scan,
             claim_token,
@@ -1719,6 +1534,189 @@ def complete_scan_locked(
         connection.rollback()
         raise
     return scan_context(connection, scan["id"])
+
+
+def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
+    repository = require_target(args.repository)
+    require_scannable_target(repository)
+    scan_dir = require_canonical_scan_directory(Path(args.scan_dir).expanduser())
+    if scan_dir == repository or repository in scan_dir.parents:
+        raise SystemExit("The scan artifact directory must be outside the selected target.")
+    if next(scan_dir.iterdir(), None) is not None:
+        raise SystemExit("The scan artifact directory must be empty before the scan starts.")
+
+    recipe = parse_scan_recipe(args.recipe_json, repository)
+    requested_target = recipe["target"]
+    paths = requested_target["paths"]
+    scope = paths[0] if len(paths) == 1 else "."
+    diff_target = None
+    if requested_target["kind"] in {"refs", "working_tree"}:
+        current_head = require_review_changes_target(repository)
+        base = resolve_git_commit(repository, requested_target["base"], "Base revision")
+        head = resolve_git_commit(repository, requested_target["head"], "Head revision")
+        diff_target = {
+            "kind": "range" if requested_target["kind"] == "refs" else "working_tree",
+            "baseRevision": base,
+            "headRevision": head,
+        }
+        if requested_target["kind"] == "working_tree":
+            if head != current_head:
+                raise SystemExit("Working-tree HEAD changed before the scan started.")
+            diff_target["contentDigest"] = worktree_content_digest(repository)
+    mode = "diff" if diff_target is not None else recipe["mode"]
+    target_identity = scan_target_identity(repository, diff_target)
+    scope_file_count = (
+        directory_snapshot_regular_file_count(repository)
+        if not paths
+        else sum(
+            1
+            if (repository / path).is_file()
+            else directory_snapshot_regular_file_count(repository / path)
+            for path in paths
+        )
+    )
+    parent_scan_id = (
+        require_uuid(args.parent_scan_id, "parent-scan-id")
+        if args.parent_scan_id is not None
+        else None
+    )
+    timestamp = now()
+    scan_id = str(uuid.uuid4())
+    workspace_id = str(uuid.uuid4())
+
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        target_id = ensure_security_target(connection, str(repository))
+        if parent_scan_id is not None:
+            parent = require_scan(connection, parent_scan_id)
+            if parent["target_id"] != target_id:
+                raise SystemExit("A rerun must belong to the same repository as its parent scan.")
+
+        connection.execute(
+            """
+            INSERT INTO workspaces (
+                id, target_id, target_path, target_title, default_scope, default_mode,
+                diff_target_kind, diff_base_revision, diff_head_revision,
+                diff_content_digest, submitted, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            """,
+            (
+                workspace_id,
+                target_id,
+                str(repository),
+                repository.name,
+                scope,
+                mode,
+                *scan_diff_identity(diff_target),
+                timestamp,
+                timestamp,
+            ),
+        )
+        workspace = require_workspace(connection, workspace_id)
+        insert_running_scan(
+            connection,
+            scan_id=scan_id,
+            workspace=workspace,
+            target=repository,
+            scope=scope,
+            diff_target=diff_target,
+            target_identity=target_identity,
+            target_root=scan_dir.parent,
+            target_summary=None,
+            scope_file_count=scope_file_count,
+            timestamp=timestamp,
+            handoff_status="delivered",
+            scan_dir=scan_dir,
+        )
+        connection.execute(
+            "UPDATE scans SET recipe_json = ?, parent_scan_id = ? WHERE id = ?",
+            (
+                json.dumps(recipe, allow_nan=False, separators=(",", ":"), sort_keys=True),
+                parent_scan_id,
+                scan_id,
+            ),
+        )
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    return {"scanDir": str(scan_dir), "scanId": scan_id, "targetId": target_id}
+
+
+def parse_scan_recipe(value: str, repository: Path) -> dict[str, Any]:
+    if len(value.encode("utf-8")) > SCAN_RECIPE_MAX_BYTES:
+        raise SystemExit("Scan launch recipe must be no larger than 256 KiB.")
+    try:
+        recipe = json.loads(value, parse_constant=reject_non_finite_json)
+    except (TypeError, UnicodeError, ValueError) as exc:
+        raise SystemExit("Scan launch recipe must be a valid JSON object.") from exc
+    if not isinstance(recipe, dict):
+        raise SystemExit("Scan launch recipe must be a JSON object.")
+    requested_repository = recipe.get("repository")
+    if (
+        not isinstance(requested_repository, str)
+        or require_target(requested_repository) != repository
+    ):
+        raise SystemExit("Scan launch recipe repository must match the scanned repository.")
+    if recipe.get("mode") not in {"standard", "deep"}:
+        raise SystemExit("Scan launch recipe mode must be standard or deep.")
+    if not isinstance(recipe.get("config"), dict):
+        raise SystemExit("Scan launch recipe config must be a JSON object.")
+    target = recipe.get("target")
+    if not isinstance(target, dict) or target.get("kind") not in {
+        "repository",
+        "paths",
+        "refs",
+        "working_tree",
+    }:
+        raise SystemExit("Scan launch recipe target must identify a supported scan target.")
+    paths = target.get("paths")
+    if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
+        raise SystemExit("Scan launch recipe target paths must be an array of strings.")
+    if target["kind"] == "paths" and not paths:
+        raise SystemExit("A scoped scan launch recipe must include at least one target path.")
+    if target["kind"] != "paths" and paths:
+        raise SystemExit("Only scoped scan launch recipes can include target paths.")
+    for path in paths:
+        candidate = PurePosixPath(path)
+        if (
+            not path
+            or candidate.is_absolute()
+            or ".." in candidate.parts
+            or "\\" in path
+            or not (repository / candidate).exists()
+            or not (repository / candidate).resolve().is_relative_to(repository)
+        ):
+            raise SystemExit("Scan launch recipe target paths must exist inside the repository.")
+    if target["kind"] in {"refs", "working_tree"}:
+        if not isinstance(target.get("base"), str) or not isinstance(target.get("head"), str):
+            raise SystemExit("Diff scan launch recipes require resolved base and head revisions.")
+    return recipe
+
+
+def get_scan_recipe(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
+    scan = require_scan(connection, args.scan_id)
+    if scan["recipe_json"] is None:
+        raise SystemExit("This scan does not have a saved launch recipe.")
+    return {
+        "parentScanId": scan["parent_scan_id"],
+        "recipe": json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json),
+        "scanId": scan["id"],
+    }
+
+
+def coverage_for_comparison(scan: sqlite3.Row) -> dict[str, Any]:
+    if scan["seal_manifest_digest"] is None:
+        raise SystemExit("Only sealed scans can be compared.")
+    scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
+    require_recorded_manifest_digest(scan, scan_dir)
+    try:
+        _, _, manifest, _, coverage, was_sealed, _ = _prepare_scan_finalization(scan_dir)
+    except ContractError as exc:
+        raise SystemExit(str(exc)) from exc
+    if not was_sealed or manifest["scan"]["id"] != scan["id"]:
+        raise SystemExit("Only sealed scans can be compared.")
+    return coverage
 
 
 def fail_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
@@ -2865,11 +2863,15 @@ def scan_context(
     occurrence_id: str | None = None,
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
-    return {
+    context = {
         "otherRunningDeepScans": deep_scan.other_running_deep_scans(connection, scan["id"]),
         "scan": scan_result(connection, scan, occurrence_id=occurrence_id),
         "workspace": workspace_state(connection, scan["workspace_id"], result_scan_id=scan["id"]),
     }
+    if scan["recipe_json"] is not None:
+        context["parentScanId"] = scan["parent_scan_id"]
+        context["recipe"] = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
+    return context
 
 
 def list_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
@@ -3566,7 +3568,18 @@ def main() -> None:
         elif args.command == "get-scan":
             result = scan_context(connection, args.scan_id, args.occurrence_id)
         elif args.command == "list-scans":
-            result = scan_history.list_scans(connection)
+            result = scan_history.list_scans(connection, args)
+        elif args.command == "register-cli-scan":
+            result = register_cli_scan(connection, args)
+        elif args.command == "get-scan-recipe":
+            result = get_scan_recipe(connection, args)
+        elif args.command == "compare-scans":
+            result = scan_history.compare_scans(
+                connection,
+                args,
+                require_scan=require_scan,
+                read_coverage=coverage_for_comparison,
+            )
         elif args.command == "list-findings":
             result = list_findings(connection, args)
         elif args.command == "update-progress":

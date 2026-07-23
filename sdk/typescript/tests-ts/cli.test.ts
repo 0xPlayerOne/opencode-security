@@ -16,7 +16,11 @@ import { join } from "node:path";
 import { Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { describe, expect, test } from "bun:test";
-import type { CodexSecurity, CodexSecurityConfig } from "../src/index.js";
+import type {
+  CodexSecurity,
+  CodexSecurityConfig,
+  JsonObject,
+} from "../src/index.js";
 import {
   BUNDLED_PLUGIN_VERSION,
   CodexSecurityError,
@@ -287,6 +291,7 @@ function dependencies(
     onInterrupt?: () => void;
     onClose?: () => void | Promise<void>;
     onCodex?: (args: readonly string[]) => number;
+    onWorkbench?: (args: readonly string[]) => JsonObject | Promise<JsonObject>;
     currentDirectory?: string;
     preflight?: ScanPreflight;
     signals?: FakeSignals;
@@ -337,6 +342,8 @@ function dependencies(
     writeSynchronously: (stream, value) => stream.write(value),
     forceExit: () => {},
     runCodex: async (args) => options.onCodex?.(args) ?? 0,
+    runWorkbench: async (args) =>
+      (await options.onWorkbench?.(args)) ?? { scans: [] },
     exportFindings: async (arguments_) => {
       const contents = new TextEncoder().encode(
         arguments_.format === "csv"
@@ -402,6 +409,12 @@ describe("CLI", () => {
     expect(manifest.text()).toContain("codex-security export <scanDir>");
     expect(manifest.text()).toContain("codex-security validate <findings...>");
     expect(manifest.text()).toContain("codex-security patch <issues...>");
+    expect(manifest.text()).toContain("codex-security scans list [repository]");
+    expect(manifest.text()).toContain("codex-security scans show <scanId>");
+    expect(manifest.text()).toContain("codex-security scans rerun <scanId>");
+    expect(manifest.text()).toContain(
+      "codex-security scans compare <beforeId> <afterId>",
+    );
     expect(manifest.text()).toContain("codex-security info");
 
     const completions = capture();
@@ -546,6 +559,219 @@ describe("CLI", () => {
       scanMcp: false,
     });
   }, 30_000);
+
+  test("lists repository and scan-root history without starting Codex", async () => {
+    const cases: Array<[string[], string[]]> = [
+      [["scans"], ["list-scans", "--repository", "/current/repository"]],
+      [
+        ["scans", "list"],
+        ["list-scans", "--repository", "/current/repository"],
+      ],
+      [
+        ["scans", "list", "other"],
+        ["list-scans", "--repository", "/current/repository/other"],
+      ],
+      [
+        ["scans", "list", "--scan-root", "/tmp/history"],
+        ["list-scans", "--scan-root", "/tmp/history"],
+      ],
+    ];
+    for (const [argv, expected] of cases) {
+      let invocation: readonly string[] | undefined;
+      const deps = dependencies({
+        onWorkbench: (args) => {
+          invocation = args;
+          return { scans: [{ scanId: "scan-1" }] };
+        },
+      });
+      deps.createSecurity = () => {
+        throw new Error("history must not initialize Codex");
+      };
+      expect(await main(argv, capture().stream, capture().stream, deps)).toBe(
+        0,
+      );
+      expect(invocation).toEqual(expected);
+    }
+
+    const stdout = capture();
+    expect(
+      await main(
+        ["scan", "scans", "--dry-run", "--json"],
+        stdout.stream,
+        capture().stream,
+        dependencies(),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toMatchObject({ repository: "scans" });
+  });
+
+  test("shows and compares scans with one workbench call per command", async () => {
+    const cases: Array<[string[], string[], JsonObject, JsonObject]> = [
+      [
+        ["scans", "show", "scan-1", "--json"],
+        ["get-scan", "--scan-id", "scan-1"],
+        {
+          scan: { scanId: "scan-1", findingCount: 2 },
+          recipe: { repository: "/repo" },
+          parentScanId: "scan-0",
+          workspace: { results: { duplicated: true } },
+        },
+        {
+          scanId: "scan-1",
+          findingCount: 2,
+          recipe: { repository: "/repo" },
+          parentScanId: "scan-0",
+        },
+      ],
+      [
+        ["scans", "show", "legacy", "--json"],
+        ["get-scan", "--scan-id", "legacy"],
+        { scan: { scanId: "legacy" } },
+        { scanId: "legacy" },
+      ],
+      [
+        ["scans", "compare", "before", "after", "--json"],
+        [
+          "compare-scans",
+          "--before-scan-id",
+          "before",
+          "--after-scan-id",
+          "after",
+        ],
+        { comparable: true, summary: { persisting: 1, resolved: 1 } },
+        { comparable: true, summary: { persisting: 1, resolved: 1 } },
+      ],
+    ];
+    for (const [argv, expected, response, output] of cases) {
+      const calls: Array<readonly string[]> = [];
+      const stdout = capture();
+      const deps = dependencies({
+        onWorkbench: (args) => {
+          calls.push(args);
+          return response;
+        },
+      });
+      deps.createSecurity = () => {
+        throw new Error("history must not initialize Codex");
+      };
+      expect(await main(argv, stdout.stream, capture().stream, deps)).toBe(0);
+      expect(calls).toEqual([expected]);
+      expect(JSON.parse(stdout.text())).toEqual(output);
+    }
+  });
+
+  test("reruns canonical recipes with exact config, policy, plugin, and lineage", async () => {
+    let config: CodexSecurityConfig | undefined;
+    let repository: string | undefined;
+    let options: Record<string, unknown> | undefined;
+    const savedConfig = {
+      model: "gpt-original",
+      model_reasoning_effort: "high",
+      features: { goals: true },
+      agents: { max_threads: 6 },
+    };
+    expect(
+      await main(
+        ["scans", "rerun", "scan-original"],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          onConfig: (value) => {
+            config = value;
+          },
+          onTurn: (value, runOptions) => {
+            repository = value;
+            options = runOptions as Record<string, unknown>;
+          },
+          onWorkbench: () => ({
+            recipe: {
+              repository: "/original/repository",
+              target: { kind: "paths", paths: ["src", "packages/core"] },
+              mode: "deep",
+              pluginVersion: "1.2.3",
+              failOnSeverity: "high",
+              config: savedConfig,
+            },
+          }),
+        }),
+      ),
+    ).toBe(0);
+    expect(config?.codexOverrides).toEqual(savedConfig);
+    expect(repository).toBe("/original/repository");
+    expect(options).toMatchObject({
+      target: ["src", "packages/core"],
+      mode: "deep",
+      parentScanId: "scan-original",
+      expectedPluginVersion: "1.2.3",
+      failureSeverity: "high",
+    });
+
+    const references: Array<[JsonObject, ReturnType<typeof DiffTarget.refs>]> =
+      [
+        [
+          {
+            kind: "refs",
+            paths: [],
+            base: "old-base-sha",
+            baseRef: "origin/main",
+            head: "old-head-sha",
+            headRef: "feature",
+          },
+          DiffTarget.refs({ base: "origin/main", head: "feature" }),
+        ],
+        [
+          { kind: "refs", paths: [], base: "old-base-sha" },
+          DiffTarget.refs({ base: "old-base-sha", head: "HEAD" }),
+        ],
+      ];
+    for (const [target, expected] of references) {
+      let runOptions: Record<string, unknown> | undefined;
+      expect(
+        await main(
+          ["scans", "rerun", "scan-original"],
+          capture().stream,
+          capture().stream,
+          dependencies({
+            onTurn: (_repository, value) => {
+              runOptions = value as Record<string, unknown>;
+            },
+            onWorkbench: () => ({
+              recipe: {
+                repository: "/original/repository",
+                target,
+                mode: "standard",
+                config: {},
+              },
+            }),
+          }),
+        ),
+      ).toBe(0);
+      expect(runOptions?.["target"]).toEqual(expected);
+    }
+  });
+
+  test("redacts workbench failures and does not initialize Codex", async () => {
+    const stderr = capture();
+    let started = false;
+    expect(
+      await main(
+        ["scans", "show", "missing"],
+        capture().stream,
+        stderr.stream,
+        dependencies({
+          onRun: () => {
+            started = true;
+          },
+          onWorkbench: () => {
+            throw new Error(`Scan lookup failed ${SYNTHETIC_CREDENTIALS}`);
+          },
+        }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(REDACTED_CREDENTIALS);
+    expect(stderr.text()).not.toContain("SYNTHETIC_KEY_123");
+    expect(started).toBe(false);
+  });
 
   test("prints SDK metadata without starting a scan", async () => {
     const stdout = capture();

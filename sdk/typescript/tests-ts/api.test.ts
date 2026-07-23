@@ -39,6 +39,7 @@ import {
   runScanEvents,
 } from "../src/api.js";
 import { writeCodexConfig } from "../src/config.js";
+import { runWorkbench } from "../src/runtime.js";
 import { normalizeTarget } from "../src/targets.js";
 import { INTEGRATION_TARGET, PLUGIN_ROOT } from "./plugin-root.js";
 
@@ -49,10 +50,29 @@ type ScanObserverName = Parameters<
 const REPOSITORY_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
 const temporaryDirectories: string[] = [];
-const TestClient = CodexSecurity as unknown as new (
+const TestClientBase = CodexSecurity as unknown as new (
   config: Record<string, unknown>,
   dependencies: Record<string, unknown>,
 ) => CodexSecurity;
+
+class TestClient extends TestClientBase {
+  public constructor(
+    config: Record<string, unknown>,
+    dependencies: Record<string, unknown>,
+  ) {
+    super(config, {
+      runWorkbench: async (_options: unknown, args: readonly string[]) =>
+        args[0] === "register-cli-scan"
+          ? {
+              scanId: "scan_example_001",
+              targetId: "target_sha256_example",
+              scanDir: args[args.indexOf("--scan-dir") + 1],
+            }
+          : {},
+      ...dependencies,
+    });
+  }
+}
 
 afterEach(async () => {
   await Promise.all(
@@ -570,7 +590,10 @@ describe("CodexSecurity orchestration", () => {
     );
     await mkdir(repository);
     const sanitized = scanPreflightCodexConfig({
+      model: "gpt-5.6-sol",
+      model_reasoning_effort: "high",
       features: {
+        plugins: true,
         goals: true,
         multi_agent_v2: { enabled: false, secret: "FEATURE_SECRET" },
         api_key: "FEATURE_KEY",
@@ -579,7 +602,9 @@ describe("CodexSecurity orchestration", () => {
       profile: "review",
       profiles: {
         review: {
+          model: "profile-model",
           features: { goals: true, secret: "PROFILE_SECRET" },
+          agents: { max_threads: 4, token: "PROFILE_AGENT_TOKEN" },
           shell_environment_policy: { set: { SECRET: "PROFILE_ENV_SECRET" } },
         },
         secret_profile: { features: { goals: false } },
@@ -607,11 +632,17 @@ describe("CodexSecurity orchestration", () => {
       shell_environment_policy: { set: { SECRET: "SHELL_SECRET" } },
     });
     expect(sanitized).toEqual({
+      model: "gpt-5.6-sol",
+      model_reasoning_effort: "high",
       features: { goals: true, multi_agent_v2: { enabled: false } },
       agents: { max_threads: 12, max_depth: 2 },
       profile: "review",
       profiles: {
-        review: { features: { goals: true } },
+        review: {
+          model: "profile-model",
+          features: { goals: true },
+          agents: { max_threads: 4 },
+        },
         development: { features: { goals: true } },
       },
       project_root_markers: [".git", ".workspace", "settings.gradle"],
@@ -627,6 +658,7 @@ describe("CodexSecurity orchestration", () => {
       "FEATURE_KEY",
       "AGENT_TOKEN",
       "PROFILE_SECRET",
+      "PROFILE_AGENT_TOKEN",
       "PROFILE_ENV_SECRET",
       "PROJECT_TOKEN",
       "MCP_TOKEN",
@@ -1212,13 +1244,10 @@ describe("CodexSecurity orchestration", () => {
     let prompt = "";
     let scanStarted = false;
     const reconnects: Array<[number, number]> = [];
+    const commands: Array<readonly string[]> = [];
 
-    const TestClient = CodexSecurity as unknown as new (
-      config: Record<string, unknown>,
-      dependencies: Record<string, unknown>,
-    ) => CodexSecurity;
     const client = new TestClient(
-      {},
+      { codexOverrides: { model: "replay-model" } },
       {
         environment: { PATH: "/usr/bin", OPENAI_API_KEY: "" },
         prepareRuntime: async () => ({
@@ -1243,6 +1272,16 @@ describe("CodexSecurity orchestration", () => {
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
+        runWorkbench: async (_options: unknown, args: readonly string[]) => {
+          commands.push(args);
+          return args[0] === "register-cli-scan"
+            ? {
+                scanId: "scan_example_001",
+                targetId: "target_sha256_example",
+                scanDir,
+              }
+            : {};
+        },
         createCodex: (options: CodexOptions) => {
           codexOptions = options;
           return {
@@ -1251,6 +1290,7 @@ describe("CodexSecurity orchestration", () => {
               return {
                 id: null,
                 async runStreamed(input: string) {
+                  expect(commands[0]?.[0]).toBe("register-cli-scan");
                   prompt = input;
                   await copyCompletedScan(root);
                   async function* reconnectingEvents(): AsyncGenerator<ThreadEvent> {
@@ -1319,6 +1359,9 @@ describe("CodexSecurity orchestration", () => {
           "CODEX_SECURITY_REPOSITORY",
           "CODEX_SECURITY_SCAN_DIR",
           "CODEX_SECURITY_PLUGIN_ROOT",
+          "CODEX_SECURITY_STATE_DIR",
+          "CODEX_SECURITY_SCAN_ID",
+          "CODEX_SECURITY_TARGET_ID",
         ],
         set: {
           PYTHON: "/managed/python",
@@ -1326,6 +1369,9 @@ describe("CodexSecurity orchestration", () => {
           CODEX_SECURITY_REPOSITORY: repository,
           CODEX_SECURITY_SCAN_DIR: scanDir,
           CODEX_SECURITY_PLUGIN_ROOT: PLUGIN_ROOT,
+          CODEX_SECURITY_STATE_DIR: expect.any(String),
+          CODEX_SECURITY_SCAN_ID: expect.any(String),
+          CODEX_SECURITY_TARGET_ID: expect.any(String),
         },
       },
     });
@@ -1344,6 +1390,179 @@ describe("CodexSecurity orchestration", () => {
     );
     expect(prompt).toContain('Repository root: "$CODEX_SECURITY_REPOSITORY"');
     expect(prompt).toContain('Use "$PYTHON" as <python_command>');
+    expect(
+      JSON.parse(commands[0]![commands[0]!.indexOf("--recipe-json") + 1]!),
+    ).toMatchObject({
+      repository,
+      target: { kind: "repository", paths: [] },
+      mode: "standard",
+      repositoryRevision: "deadbeef",
+      pluginVersion: "0.1.0",
+      config: { model: "replay-model" },
+    });
+    expect(commands[1]).toEqual([
+      "complete-scan",
+      "--scan-id",
+      "scan_example_001",
+    ]);
+    await client.close();
+  });
+
+  test("marks a started scan failed without masking its original error", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const stateDirectory = join(root, "state");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const environment = {
+      PATH: process.env["PATH"],
+      CODEX_SECURITY_STATE_DIR: stateDirectory,
+    };
+    const commands: Array<readonly string[]> = [];
+    const client = new TestClient(
+      {},
+      {
+        environment,
+        prepareRuntime: async () => ({
+          ...preparedRuntime(codexHome),
+          environment,
+        }),
+        resolvePluginPython: async () => python!,
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        runWorkbench: async (
+          options: Parameters<typeof runWorkbench>[0],
+          args: readonly string[],
+        ) => {
+          commands.push(args);
+          const result = await runWorkbench(options, args);
+          if (args[0] === "fail-scan") {
+            throw new Error("failure recording also failed");
+          }
+          return result;
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              throw new Error("original scan failure");
+            },
+          }),
+        }),
+      },
+    );
+    await expect(client.run(repository)).rejects.toThrow(
+      "original scan failure",
+    );
+    expect(commands[1]).toMatchObject([
+      "fail-scan",
+      "--scan-id",
+      expect.stringMatching(/^[0-9a-f-]{36}$/),
+      "--message",
+      "original scan failure",
+    ]);
+    const history = await runWorkbench(
+      { python: python!, pluginRoot: PLUGIN_ROOT, environment },
+      ["list-scans", "--repository", repository],
+    );
+    expect(history["scans"]).toMatchObject([
+      { progress: { status: "failed" } },
+    ]);
+    await client.close();
+  });
+
+  test("retains default scan output under persistent plugin state", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const stateDirectory = join(root, "state");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    const client = new TestClient(
+      {},
+      {
+        environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        repositoryRevision: async () => "deadbeef",
+        createCodex: (options: CodexOptions) => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              const scanDir = options.env?.["CODEX_SECURITY_SCAN_DIR"];
+              if (scanDir === undefined)
+                throw new Error("missing scan directory");
+              await cp(EXAMPLE, scanDir, { recursive: true });
+              await writeFile(join(scanDir, "report.md"), "# Scan report\n");
+              return { events: completedEvents() };
+            },
+          }),
+        }),
+      },
+    );
+
+    const result = await client.run(repository);
+    expect(
+      result.scanDir.startsWith(join(stateDirectory, "scans", "repository")),
+    ).toBe(true);
+    if (process.platform !== "win32") {
+      expect((await stat(result.scanDir)).mode & 0o777).toBe(0o700);
+    }
+    await client.close();
+    expect(existsSync(join(result.scanDir, "scan-manifest.json"))).toBe(true);
+  });
+
+  test("rejects repository-local state even when scan output is outside", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const stateDirectory = join(repository, "state");
+    await mkdir(repository);
+    const client = new TestClient(
+      {},
+      {
+        environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
+        prepareRuntime: async () => {
+          throw new Error("Runtime must not start");
+        },
+        resolvePluginPython: async () => "/managed/python",
+        createCodex: () => {
+          throw new Error("Codex must not start");
+        },
+      },
+    );
+
+    await expect(
+      client.run(repository, { outputDir: join(root, "output") }),
+    ).rejects.toBeInstanceOf(OutputInsideProtectedRootError);
+    expect(existsSync(stateDirectory)).toBe(false);
+    await client.close();
+  });
+
+  test("rejects reruns when the original plugin version is unavailable", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        createCodex: () => {
+          throw new Error("Codex must not start");
+        },
+      },
+    );
+
+    await expect(
+      client.run(repository, { expectedPluginVersion: "0.0.1" }),
+    ).rejects.toThrow("original scan used plugin version 0.0.1");
     await client.close();
   });
 
@@ -1729,6 +1948,9 @@ describe("CodexSecurity orchestration", () => {
         CODEX_SECURITY_REPOSITORY: repository,
         CODEX_SECURITY_SCAN_DIR: scanDir,
         CODEX_SECURITY_PLUGIN_ROOT: PLUGIN_ROOT,
+        CODEX_SECURITY_STATE_DIR: expect.any(String),
+        CODEX_SECURITY_SCAN_ID: expect.any(String),
+        CODEX_SECURITY_TARGET_ID: expect.any(String),
         CODEX_SECURITY_TARGET_PATHS_FILE: targetPathsFile,
       },
       include_only: [
@@ -1739,6 +1961,9 @@ describe("CodexSecurity orchestration", () => {
         "CODEX_SECURITY_REPOSITORY",
         "CODEX_SECURITY_SCAN_DIR",
         "CODEX_SECURITY_PLUGIN_ROOT",
+        "CODEX_SECURITY_STATE_DIR",
+        "CODEX_SECURITY_SCAN_ID",
+        "CODEX_SECURITY_TARGET_ID",
         "CODEX_SECURITY_TARGET_PATHS_FILE",
       ],
     });
@@ -1779,6 +2004,9 @@ describe("CodexSecurity orchestration", () => {
         CODEX_SECURITY_REPOSITORY: repository,
         CODEX_SECURITY_SCAN_DIR: scanDir,
         CODEX_SECURITY_PLUGIN_ROOT: PLUGIN_ROOT,
+        CODEX_SECURITY_STATE_DIR: expect.any(String),
+        CODEX_SECURITY_SCAN_ID: expect.any(String),
+        CODEX_SECURITY_TARGET_ID: expect.any(String),
         CODEX_SECURITY_TARGET_PATHS_FILE: targetPathsFile,
       },
       include_only: [
@@ -1787,6 +2015,9 @@ describe("CodexSecurity orchestration", () => {
         "CODEX_SECURITY_REPOSITORY",
         "CODEX_SECURITY_SCAN_DIR",
         "CODEX_SECURITY_PLUGIN_ROOT",
+        "CODEX_SECURITY_STATE_DIR",
+        "CODEX_SECURITY_SCAN_ID",
+        "CODEX_SECURITY_TARGET_ID",
         "CODEX_SECURITY_TARGET_PATHS_FILE",
       ],
     });
@@ -2029,10 +2260,6 @@ describe("CodexSecurity orchestration", () => {
     const root = await temporaryDirectory();
     const codexHome = join(root, "codex-home");
     await mkdir(codexHome);
-    const TestClient = CodexSecurity as unknown as new (
-      config: Record<string, unknown>,
-      dependencies: Record<string, unknown>,
-    ) => CodexSecurity;
     const client = new TestClient(
       {},
       {
@@ -2086,10 +2313,6 @@ if (process.argv.slice(2).join(" ") !== "login --with-api-key") {
     let codexOptions: CodexOptions | null = null;
     let pythonEnvironment: Record<string, string | undefined> | undefined;
     let pythonProtectedRoot: string | undefined;
-    const TestClient = CodexSecurity as unknown as new (
-      config: Record<string, unknown>,
-      dependencies: Record<string, unknown>,
-    ) => CodexSecurity;
     const client = new TestClient(
       {},
       {
@@ -2252,10 +2475,6 @@ appendFileSync(${JSON.stringify(keyLog)}, apiKey.trim() + "\\n");
     const environment: Record<string, string | undefined> = {
       openai_api_key: "ambient-key",
     };
-    const TestClient = CodexSecurity as unknown as new (
-      config: Record<string, unknown>,
-      dependencies: Record<string, unknown>,
-    ) => CodexSecurity;
     const client = new TestClient(
       {},
       {
@@ -2304,10 +2523,6 @@ appendFileSync(${JSON.stringify(keyLog)}, apiKey.trim() + "\\n");
       releaseRuntime = resolve;
     });
     let createCodexCalled = false;
-    const TestClient = CodexSecurity as unknown as new (
-      config: Record<string, unknown>,
-      dependencies: Record<string, unknown>,
-    ) => CodexSecurity;
     const client = new TestClient(
       {},
       {
@@ -2359,10 +2574,6 @@ appendFileSync(${JSON.stringify(keyLog)}, apiKey.trim() + "\\n");
     const prepared = new Promise<Record<string, unknown>>((resolve) => {
       releaseRuntime = resolve;
     });
-    const TestClient = CodexSecurity as unknown as new (
-      config: Record<string, unknown>,
-      dependencies: Record<string, unknown>,
-    ) => CodexSecurity;
     const client = new TestClient(
       {},
       {
@@ -2425,10 +2636,6 @@ appendFileSync(${JSON.stringify(keyLog)}, apiKey.trim() + "\\n");
       releaseRevision = resolve;
     });
     let createCodexCalled = false;
-    const TestClient = CodexSecurity as unknown as new (
-      config: Record<string, unknown>,
-      dependencies: Record<string, unknown>,
-    ) => CodexSecurity;
     const client = new TestClient(
       {},
       {
@@ -2584,10 +2791,6 @@ appendFileSync(${JSON.stringify(keyLog)}, apiKey.trim() + "\\n");
       fakeCodex,
       'console.error("Open https://auth.example.test/device");\nconsole.error("User code: ABCD-EFGH");\nsetInterval(() => {}, 1000);\n',
     );
-    const TestClient = CodexSecurity as unknown as new (
-      config: Record<string, unknown>,
-      dependencies: Record<string, unknown>,
-    ) => CodexSecurity;
     const client = new TestClient(
       {},
       {
@@ -2645,10 +2848,6 @@ if (args === "login --with-api-key") {
 `,
     );
     let codexOptions: CodexOptions | null = null;
-    const TestClient = CodexSecurity as unknown as new (
-      config: Record<string, unknown>,
-      dependencies: Record<string, unknown>,
-    ) => CodexSecurity;
     const client = new TestClient(
       {},
       {
@@ -2725,10 +2924,6 @@ for await (const _chunk of process.stdin) {}
 setInterval(() => {}, 1000);
 `,
     );
-    const TestClient = CodexSecurity as unknown as new (
-      config: Record<string, unknown>,
-      dependencies: Record<string, unknown>,
-    ) => CodexSecurity;
     const client = new TestClient(
       {},
       {

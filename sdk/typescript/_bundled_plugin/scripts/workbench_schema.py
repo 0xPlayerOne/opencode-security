@@ -551,6 +551,14 @@ MIGRATIONS = (
 
         """,
     ),
+    (
+        22,
+        "replayable scan launch recipes",
+        """
+        ALTER TABLE scans ADD COLUMN recipe_json TEXT;
+        ALTER TABLE scans ADD COLUMN parent_scan_id TEXT REFERENCES scans(id) ON DELETE SET NULL;
+        """,
+    ),
 )
 
 

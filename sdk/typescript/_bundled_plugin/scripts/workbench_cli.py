@@ -135,7 +135,22 @@ def parse_args(description: str) -> argparse.Namespace:
     get_scan.add_argument("--scan-id", required=True)
     get_scan.add_argument("--occurrence-id")
 
-    subparsers.add_parser("list-scans")
+    list_scans = subparsers.add_parser("list-scans")
+    list_scans.add_argument("--repository")
+    list_scans.add_argument("--scan-root")
+
+    register_cli_scan = subparsers.add_parser("register-cli-scan")
+    register_cli_scan.add_argument("--scan-dir", required=True)
+    register_cli_scan.add_argument("--repository", required=True)
+    register_cli_scan.add_argument("--recipe-json", required=True)
+    register_cli_scan.add_argument("--parent-scan-id")
+
+    get_scan_recipe = subparsers.add_parser("get-scan-recipe")
+    get_scan_recipe.add_argument("--scan-id", required=True)
+
+    compare_scans = subparsers.add_parser("compare-scans")
+    compare_scans.add_argument("--before-scan-id", required=True)
+    compare_scans.add_argument("--after-scan-id", required=True)
 
     list_findings = subparsers.add_parser("list-findings")
     list_findings.add_argument("--scan-id", required=True)

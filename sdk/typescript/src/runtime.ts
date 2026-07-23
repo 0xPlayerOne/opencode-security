@@ -35,10 +35,12 @@ import { crc32 } from "node:zlib";
 import extractZip from "extract-zip";
 import { parse } from "smol-toml";
 import {
+  CodexSecurityError,
   OutputDirectoryError,
   PluginBootstrapError,
   PluginPythonUnavailableError,
 } from "./errors.js";
+import type { JsonObject } from "./config.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
@@ -79,6 +81,87 @@ export interface PluginPythonOptions {
   managedRuntimeRoots?: readonly string[];
   protectedRoot?: string;
   signal?: AbortSignal;
+}
+
+export interface WorkbenchCommandOptions {
+  python: string;
+  pluginRoot: string;
+  environment: ProcessEnvironment;
+  signal?: AbortSignal;
+  failureMessage?: string;
+}
+
+export function codexSecurityStateDirectory(
+  environment: ProcessEnvironment = process.env,
+): string {
+  const environmentValue = (requested: string): string | undefined => {
+    const exact = environment[requested]?.trim();
+    if (exact) return exact;
+    return Object.entries(environment)
+      .find(
+        ([name, value]) => name.toUpperCase() === requested && value?.trim(),
+      )?.[1]
+      ?.trim();
+  };
+  const configured = environmentValue("CODEX_SECURITY_STATE_DIR");
+  if (configured !== undefined) return resolve(expandHome(configured));
+  const codexHome = environmentValue("CODEX_HOME") ?? join(homedir(), ".codex");
+  return resolve(expandHome(codexHome), "state", "plugins", "codex-security");
+}
+
+export async function preparePersistentScanRoot(
+  stateDirectory: string,
+  repositoryName: string,
+): Promise<string> {
+  const root = join(stateDirectory, "scans", safePrefix(repositoryName));
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  return await realpath(root);
+}
+
+export async function runWorkbench(
+  options: WorkbenchCommandOptions,
+  args: readonly string[],
+): Promise<JsonObject> {
+  let stdout: string;
+  try {
+    ({ stdout } = await execFile(
+      options.python,
+      [
+        "-I",
+        "-B",
+        join(options.pluginRoot, "scripts", "workbench_db.py"),
+        ...args,
+      ],
+      {
+        env: withoutApiKeyCredentials(options.environment),
+        encoding: "utf8",
+        maxBuffer: 4 * 1024 * 1024,
+        windowsHide: true,
+        signal: options.signal,
+      },
+    ));
+  } catch (error) {
+    if (options.signal?.aborted) throw error;
+    throw new CodexSecurityError(
+      `${options.failureMessage ?? "Could not run the Codex Security workbench"}: ${processErrorDetail(error)}`,
+      { cause: error },
+    );
+  }
+  let result: unknown;
+  try {
+    result = JSON.parse(stdout);
+  } catch (error) {
+    throw new CodexSecurityError(
+      "The Codex Security workbench returned invalid JSON.",
+      { cause: error },
+    );
+  }
+  if (!isRecord(result)) {
+    throw new CodexSecurityError(
+      "The Codex Security workbench returned an invalid response.",
+    );
+  }
+  return result as JsonObject;
 }
 
 export function bundledPluginCandidates(moduleDirectory: string): string[] {

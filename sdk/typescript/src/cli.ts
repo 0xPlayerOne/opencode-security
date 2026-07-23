@@ -38,9 +38,11 @@ import { runMultiscan } from "./multiscan.js";
 import type { ScanResult } from "./result.js";
 import {
   bundledPluginRoot,
+  codexSecurityStateDirectory,
   expandHome,
   resolveCodexCommand,
   resolvePluginPython,
+  runWorkbench,
 } from "./runtime.js";
 import type { ScanWorkerStatus } from "./worker-progress.js";
 import { DiffTarget, type ScanMode, type ScanTarget } from "./targets.js";
@@ -91,6 +93,7 @@ const VALUE_OPTIONS = new Set([
   "--filter-output",
   "--token-limit",
   "--token-offset",
+  "--scan-root",
 ]);
 
 function optionValue(flag: string) {
@@ -110,8 +113,11 @@ interface ScanArguments {
   pluginPath?: string;
   pythonPath?: string;
   codex: string[];
+  codexOverrides?: JsonObject;
   failOnSeverity?: FailureSeverity;
   dryRun: boolean;
+  parentScanId?: string;
+  expectedPluginVersion?: string;
 }
 
 interface ScanOutcome {
@@ -145,6 +151,7 @@ interface CliDependencies {
     output?: Writable,
   ): Promise<Uint8Array | undefined>;
   runCodex(args: readonly string[]): Promise<number>;
+  runWorkbench(args: readonly string[]): Promise<JsonObject>;
 }
 
 const DEFAULT_DEPENDENCIES: CliDependencies = {
@@ -275,6 +282,22 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     }
     return undefined;
   },
+  runWorkbench: async (args) => {
+    const environment = {
+      ...exportEnvironment(),
+      CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(),
+    };
+    const python = await resolvePluginPython({ environment });
+    return await runWorkbench(
+      {
+        python,
+        pluginRoot: await bundledPluginRoot(),
+        environment,
+        failureMessage: "Could not read Codex Security scan history",
+      },
+      args,
+    );
+  },
 };
 
 async function writeCliOutput(
@@ -348,6 +371,7 @@ export async function main(
   errorOutput: Writable = process.stderr,
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<number> {
+  argv = defaultScansList(argv);
   const positionals: string[] = [];
   const argumentError = validateCliArguments(argv, positionals);
   if (argumentError !== undefined) {
@@ -357,6 +381,132 @@ export async function main(
   let exitCode = 0;
   let frameworkExit: number | undefined;
   let frameworkOutput = "";
+  const history = async (
+    args: readonly string[],
+    select: (value: JsonObject) => JsonObject = (value) => value,
+  ): Promise<JsonObject | undefined> => {
+    try {
+      return select(await dependencies.runWorkbench(args));
+    } catch (error) {
+      errorOutput.write(`codex-security: ${cliErrorMessage(error)}\n`);
+      exitCode = 2;
+      return undefined;
+    }
+  };
+  const scanHistory = Cli.create("scans", {
+    description:
+      "List, inspect, rerun, and compare saved Codex Security scans.",
+  })
+    .command("list", {
+      description: "List saved scans for a repository or scan root.",
+      mcp: false,
+      args: z.object({
+        repository: z
+          .string()
+          .optional()
+          .describe("Repository to inspect (default: current directory)."),
+      }),
+      options: z.object({
+        scanRoot: z
+          .string()
+          .optional()
+          .describe("Include scans whose output is under ROOT."),
+      }),
+      output: z.record(z.string(), z.unknown()).optional(),
+      async run({ args, options }) {
+        const directory = dependencies.currentDirectory();
+        return await history([
+          "list-scans",
+          ...(options.scanRoot !== undefined && args.repository === undefined
+            ? []
+            : [
+                "--repository",
+                resolve(directory, args.repository ?? directory),
+              ]),
+          ...(options.scanRoot === undefined
+            ? []
+            : ["--scan-root", resolve(directory, options.scanRoot)]),
+        ]);
+      },
+    })
+    .command("show", {
+      description: "Show the results and saved configuration for a scan.",
+      mcp: false,
+      args: z.object({
+        scanId: z.string().min(1).describe("Saved scan identifier."),
+      }),
+      output: z.record(z.string(), z.unknown()).optional(),
+      async run({ args }) {
+        return await history(
+          ["get-scan", "--scan-id", args.scanId],
+          (value) => {
+            const { scan, recipe, parentScanId } = value;
+            return {
+              ...(scan as JsonObject),
+              ...(recipe === undefined ? {} : { recipe }),
+              ...(parentScanId === undefined ? {} : { parentScanId }),
+            };
+          },
+        );
+      },
+    })
+    .command("rerun", {
+      description: "Rerun a saved scan with its original configuration.",
+      destructive: true,
+      mcp: false,
+      args: z.object({
+        scanId: z.string().min(1).describe("Saved scan identifier."),
+      }),
+      output: z.record(z.string(), z.unknown()).optional(),
+      async run({ args, error: incurError }) {
+        let scanArguments: ScanArguments;
+        try {
+          const { recipe } = await dependencies.runWorkbench([
+            "get-scan-recipe",
+            "--scan-id",
+            args.scanId,
+          ]);
+          scanArguments = scanArgumentsFromRecipe(recipe, args.scanId);
+        } catch (error) {
+          const message = cliErrorMessage(error);
+          errorOutput.write(`codex-security: ${message}\n`);
+          exitCode = 2;
+          return incurError({
+            code: "SCAN_REPLAY_UNAVAILABLE",
+            message,
+            exitCode,
+          });
+        }
+        const outcome = await runScan(scanArguments, errorOutput, dependencies);
+        exitCode = outcome.exitCode;
+        if (outcome.error !== undefined) {
+          return incurError({
+            code: "SCAN_FAILED",
+            message: outcome.error,
+            exitCode,
+          });
+        }
+        return outcome.data;
+      },
+    })
+    .command("compare", {
+      description: "Compare findings and coverage between two saved scans.",
+      mcp: false,
+      args: z.object({
+        beforeId: z.string().min(1).describe("Earlier saved scan identifier."),
+        afterId: z.string().min(1).describe("Later saved scan identifier."),
+      }),
+      output: z.record(z.string(), z.unknown()).optional(),
+      async run({ args }) {
+        return await history([
+          "compare-scans",
+          "--before-scan-id",
+          args.beforeId,
+          "--after-scan-id",
+          args.afterId,
+        ]);
+      },
+    });
   const cli = Cli.create("codex-security", {
     description: "Run, validate, patch, and export Codex Security findings.",
     version: VERSION,
@@ -498,6 +648,7 @@ export async function main(
         return outcome.data;
       },
     })
+    .command(scanHistory)
     .command("scan-csv", {
       description: "Run resumable repository scans from a CSV inventory.",
       destructive: true,
@@ -755,6 +906,127 @@ export async function main(
   }
 }
 
+function defaultScansList(argv: readonly string[]): readonly string[] {
+  const commandIndex = argv.findIndex((value, index) => {
+    if (value.startsWith("-")) return false;
+    return index === 0 || !VALUE_OPTIONS.has(argv[index - 1]!);
+  });
+  if (
+    commandIndex < 0 ||
+    argv[commandIndex] !== "scans" ||
+    argv.includes("--help") ||
+    argv.includes("-h")
+  ) {
+    return argv;
+  }
+  const following = argv[commandIndex + 1];
+  if (following !== undefined && !following.startsWith("-")) return argv;
+  return [
+    ...argv.slice(0, commandIndex + 1),
+    "list",
+    ...argv.slice(commandIndex + 1),
+  ];
+}
+
+function scanArgumentsFromRecipe(
+  recipe: JsonValue | undefined,
+  parentScanId: string,
+): ScanArguments {
+  if (recipe === undefined || !isJsonObject(recipe)) {
+    throw new CodexSecurityError(
+      "This scan does not have a saved launch recipe.",
+    );
+  }
+  const repository = recipe["repository"];
+  if (typeof repository !== "string" || repository.length === 0) {
+    throw new CodexSecurityError(
+      "The saved scan recipe does not contain a repository.",
+    );
+  }
+  const target = recipe["target"];
+  if (target === undefined || !isJsonObject(target)) {
+    throw new CodexSecurityError("The saved scan recipe contains no target.");
+  }
+  const paths = target["paths"];
+  if (
+    !Array.isArray(paths) ||
+    !paths.every(
+      (path): path is string => typeof path === "string" && path.length > 0,
+    )
+  ) {
+    throw new CodexSecurityError(
+      "The saved scan recipe contains invalid paths.",
+    );
+  }
+  const kind = target["kind"];
+  if (
+    kind !== "repository" &&
+    kind !== "paths" &&
+    kind !== "refs" &&
+    kind !== "working_tree"
+  ) {
+    throw new CodexSecurityError(
+      "The saved scan recipe contains an invalid target.",
+    );
+  }
+  const mode = recipe["mode"];
+  if (mode !== "standard" && mode !== "deep") {
+    throw new CodexSecurityError(
+      "The saved scan recipe contains an invalid mode.",
+    );
+  }
+  const config = recipe["config"];
+  if (config === undefined || !isJsonObject(config)) {
+    throw new CodexSecurityError(
+      "The saved scan recipe contains invalid configuration.",
+    );
+  }
+  const reference = target["baseRef"] ?? target["base"];
+  if (
+    (reference !== undefined && typeof reference !== "string") ||
+    (kind === "refs" && !reference)
+  ) {
+    throw new CodexSecurityError(
+      "The saved scan recipe has an invalid Git base.",
+    );
+  }
+  const head = target["headRef"];
+  if (head !== undefined && (typeof head !== "string" || head.length === 0)) {
+    throw new CodexSecurityError(
+      "The saved scan recipe has an invalid Git head.",
+    );
+  }
+  const threshold = recipe["failOnSeverity"];
+  if (
+    threshold !== undefined &&
+    (typeof threshold !== "string" ||
+      !REPORTABLE_SEVERITIES.includes(threshold as FailureSeverity))
+  ) {
+    throw new CodexSecurityError(
+      "The saved scan recipe contains an invalid severity policy.",
+    );
+  }
+  return {
+    repository,
+    paths,
+    diff: kind === "refs" ? reference : undefined,
+    workingTree: kind === "working_tree",
+    head: kind === "refs" ? head ?? "HEAD" : undefined,
+    base: kind === "working_tree" ? reference : undefined,
+    mode,
+    archiveExisting: false,
+    codex: [],
+    codexOverrides: config,
+    failOnSeverity: threshold as FailureSeverity | undefined,
+    dryRun: false,
+    parentScanId,
+    expectedPluginVersion:
+      typeof recipe["pluginVersion"] === "string"
+        ? recipe["pluginVersion"]
+        : undefined,
+  };
+}
+
 function validateCliArguments(
   argv: readonly string[],
   positionals: string[],
@@ -763,6 +1035,7 @@ function validateCliArguments(
   const commandIndex = argv.findIndex((value) =>
     [
       "scan",
+      "scans",
       "scan-csv",
       "export",
       "validate",
@@ -793,6 +1066,7 @@ function validateCliArguments(
       return "Markdown output is not supported for scan results.";
     }
   }
+  const subcommand = command === "scans" ? argv[commandIndex + 1] : undefined;
   if (command === "info") {
     const metadataFields = new Set([
       "sdkVersion",
@@ -819,7 +1093,11 @@ function validateCliArguments(
       }
     }
   }
-  for (let index = commandIndex + 1; index < argv.length; index += 1) {
+  for (
+    let index = commandIndex + (command === "scans" ? 2 : 1);
+    index < argv.length;
+    index += 1
+  ) {
     const value = argv[index]!;
     if (!value.startsWith("-")) {
       positionals.push(value);
@@ -837,9 +1115,14 @@ function validateCliArguments(
   if (
     command !== "validate" &&
     command !== "patch" &&
-    positionals.length > (command === "logout" || command === "info" ? 0 : 1)
+    positionals.length >
+      (command === "logout" || command === "info"
+        ? 0
+        : subcommand === "compare"
+          ? 2
+          : 1)
   ) {
-    return `Unexpected positional argument for ${command}.`;
+    return `Unexpected positional argument for ${command}${subcommand === undefined ? "" : ` ${subcommand}`}.`;
   }
 }
 
@@ -1027,7 +1310,8 @@ async function runScan(
     const config: CodexSecurityConfig = {
       pluginPath: arguments_.pluginPath,
       pythonPath: arguments_.pythonPath,
-      codexOverrides: parseCodexOverrides(arguments_.codex),
+      codexOverrides:
+        arguments_.codexOverrides ?? parseCodexOverrides(arguments_.codex),
     };
     progress = new Progress(errorOutput, dependencies);
     progress.startTimer(
@@ -1039,6 +1323,9 @@ async function runScan(
       mode: arguments_.mode,
       outputDir: arguments_.outputDir,
       archiveExisting: arguments_.archiveExisting,
+      parentScanId: arguments_.parentScanId,
+      expectedPluginVersion: arguments_.expectedPluginVersion,
+      failureSeverity: arguments_.failOnSeverity,
       onOutputArchived: (archiveDir) => {
         progress?.stopTimer();
         errorOutput.write(

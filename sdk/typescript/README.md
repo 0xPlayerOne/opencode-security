@@ -60,6 +60,11 @@ npx codex-security scan /path/to/repository --output-dir /path/outside/repositor
 npx codex-security scan /path/to/repository --output-dir /path/outside/repository/results --archive-existing
 npx codex-security scan /path/to/repository --dry-run
 npx codex-security scan /path/to/repository --fail-on-severity high
+npx codex-security scans list /path/to/repository
+npx codex-security scans list --scan-root /path/outside/repository/results
+npx codex-security scans show SCAN_ID
+npx codex-security scans rerun SCAN_ID
+npx codex-security scans compare PREVIOUS_SCAN_ID CURRENT_SCAN_ID
 npx codex-security scan-csv repositories.csv --output-dir /tmp/security-scans --workers 4
 npx codex-security export /path/outside/repository/results --export-format sarif --output results.sarif
 npx codex-security export /path/outside/repository/results --export-format csv --output findings.csv
@@ -108,6 +113,26 @@ service,https://github.com/acme/service.git,0123456789abcdef0123456789abcdef0123
 
 `--workers` limits concurrent scans and `--max-attempts` retries failures.
 Results remain under `--output-dir`; rerun the same command to resume.
+
+### Scan history and reruns
+
+`npx codex-security scans list` lists scans for the current repository. Pass a
+repository path to inspect another checkout, `--scan-root DIR` to list scans
+whose artifacts are under a particular root. `scans show SCAN_ID` includes the
+scan configuration, results, coverage, and artifact locations.
+
+Scan history uses the existing Codex Security workbench database at
+`$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`. Set
+`CODEX_SECURITY_STATE_DIR` to place the database elsewhere. Scan credentials
+are never stored in the scan configuration.
+
+`scans rerun SCAN_ID` repeats the original configuration against the current
+checkout so a fixed vulnerability can be checked again.
+
+`scans compare BEFORE_SCAN_ID AFTER_SCAN_ID` reconciles stable vulnerability
+identities across both scans. Findings are reported as new, persisting,
+reopened, resolved, or unknown. Missing findings are not treated as resolved
+when the later scan is incomplete or does not cover their original scope.
 
 The CLI uses [Incur](https://github.com/wevm/incur) for agent-friendly discovery
 and structured output. Inspect the command manifest with `--llms`, inspect a

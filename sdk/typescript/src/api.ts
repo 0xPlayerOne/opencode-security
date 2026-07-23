@@ -33,6 +33,7 @@ import {
   ScanInterruptedError,
 } from "./errors.js";
 import { ScanResult, type TurnResultMetadata } from "./result.js";
+import type { SeverityLevel } from "./models.js";
 import {
   workerStatusFromEvent,
   type ScanWorkerStatus,
@@ -41,18 +42,22 @@ import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "./version.js";
 import {
   bootstrapPlugin,
   cleanupSdkDirectory,
+  codexSecurityStateDirectory,
   createIsolatedHome,
   importAmbientAuth,
   pluginExecutionEnvironment,
   planOutputArchive,
   prepareOutputDir,
+  preparePersistentScanRoot,
   requireModelSafeOutputDir,
   resolveCodexCommand,
   resolvePluginPath,
   resolvePluginPython,
+  runWorkbench,
   type CodexCommand,
   type PluginInstall,
   type ProcessEnvironment,
+  type WorkbenchCommandOptions,
   validateOutputDir,
 } from "./runtime.js";
 import {
@@ -96,6 +101,7 @@ interface PreparedRuntime {
   plugin: PluginInstall;
   environment: Record<string, string>;
   credentialsAvailable: boolean;
+  effectiveConfig?: JsonObject;
 }
 
 export interface ScanOptions {
@@ -103,6 +109,9 @@ export interface ScanOptions {
   mode?: ScanMode;
   outputDir?: string;
   archiveExisting?: boolean;
+  parentScanId?: string;
+  expectedPluginVersion?: string;
+  failureSeverity?: SeverityLevel;
   onOutputArchived?: (archiveDir: string) => void;
   onOutputDirReady?: (scanDir: string) => void;
   onScanStarted?: () => void;
@@ -149,6 +158,7 @@ interface ClientDependencies {
   prepareOutputDir?: typeof prepareOutputDir;
   repositoryRevision?: typeof repositoryRevision;
   resolveCodexCommand?: () => CodexCommand;
+  runWorkbench?: typeof runWorkbench;
 }
 
 const DEFAULT_DEPENDENCIES: ClientDependencies = {
@@ -230,6 +240,11 @@ export class CodexSecurity {
         : AbortSignal.any([this.#abortController.signal, options.signal]);
     let scanDir = "";
     let targetPathsFile: string | null = null;
+    let activeScan: {
+      id: string;
+      options: WorkbenchCommandOptions;
+    } | null = null;
+    const workbench = this.#dependencies.runWorkbench ?? runWorkbench;
     try {
       const checkOpen = (): void => {
         this.#requireOpen();
@@ -244,6 +259,10 @@ export class CodexSecurity {
         outputDir: requestedOutput,
         protectedRoot,
       } = await this.#validateLocalInputs(repository, options, signal);
+      const stateDirectory = codexSecurityStateDirectory(
+        this.#dependencies.environment,
+      );
+      requireOutputOutsideRepository(protectedRoot, stateDirectory);
       checkOpen();
       let temporaryRoot: string | undefined;
       if (requestedOutput === null || this.#runtime === null) {
@@ -264,6 +283,14 @@ export class CodexSecurity {
       );
       const runtimeHome = await realpath(runtime.codexHome);
       requireOutputOutsideRepository(protectedRoot, runtimeHome, "runtime");
+      if (
+        options.expectedPluginVersion !== undefined &&
+        runtime.plugin.version !== options.expectedPluginVersion
+      ) {
+        throw new CodexSecurityError(
+          `The original scan used plugin version ${options.expectedPluginVersion}, but the installed version is ${runtime.plugin.version}.`,
+        );
+      }
       checkOpen();
       const apiKey = environmentApiKey(this.#dependencies.environment);
       if (apiKey !== null) {
@@ -297,10 +324,18 @@ export class CodexSecurity {
         signal,
       });
       checkOpen();
+      const scanOutputRoot =
+        requestedOutput === null &&
+        this.#dependencies.prepareOutputDir === undefined
+          ? await preparePersistentScanRoot(stateDirectory, basename(repo))
+          : temporaryRoot;
+      if (scanOutputRoot !== undefined) {
+        requireOutputOutsideRepository(protectedRoot, scanOutputRoot);
+      }
       scanDir = await (this.#dependencies.prepareOutputDir ?? prepareOutputDir)(
         requestedOutput ?? undefined,
         basename(repo),
-        temporaryRoot,
+        scanOutputRoot,
         (path) => requireOutputOutsideRepository(protectedRoot, path),
         options.archiveExisting,
         (archiveDir) =>
@@ -353,6 +388,51 @@ export class CodexSecurity {
         mode,
         pluginVersion: runtime.plugin.version,
       };
+      const effectiveConfig =
+        runtime.effectiveConfig ?? (await mergedCodexConfig(this.config));
+      const recipe = scanRecipe(
+        repo,
+        normalized,
+        mode,
+        expectation.repositoryRevision,
+        runtime.plugin.version,
+        effectiveConfig,
+        options.failureSeverity,
+      );
+      const workbenchOptions: WorkbenchCommandOptions = {
+        python,
+        pluginRoot: runtime.plugin.pluginRoot,
+        environment: {
+          ...runtime.environment,
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+        },
+        signal,
+        failureMessage: "Could not save the Codex Security scan",
+      };
+      const registration = await workbench(workbenchOptions, [
+        "register-cli-scan",
+        "--repository",
+        repo,
+        "--scan-dir",
+        scanDir,
+        "--recipe-json",
+        JSON.stringify(recipe),
+        ...(options.parentScanId === undefined
+          ? []
+          : ["--parent-scan-id", options.parentScanId]),
+      ]);
+      const scanId = registration["scanId"];
+      const targetId = registration["targetId"];
+      if (
+        typeof scanId !== "string" ||
+        typeof targetId !== "string" ||
+        registration["scanDir"] !== scanDir
+      ) {
+        throw new CodexSecurityError(
+          "The Codex Security workbench returned an invalid scan registration.",
+        );
+      }
+      activeScan = { id: scanId, options: workbenchOptions };
       checkOpen();
       targetPathsFile =
         normalized.kind === "paths"
@@ -367,6 +447,9 @@ export class CodexSecurity {
         CODEX_SECURITY_REPOSITORY: repo,
         CODEX_SECURITY_SCAN_DIR: scanDir,
         CODEX_SECURITY_PLUGIN_ROOT: shellPluginRoot,
+        CODEX_SECURITY_STATE_DIR: stateDirectory,
+        CODEX_SECURITY_SCAN_ID: scanId,
+        CODEX_SECURITY_TARGET_ID: targetId,
         ...(runtime.configPath === undefined
           ? {}
           : { CODEX_SECURITY_CONFIG_PATH: runtime.configPath }),
@@ -443,7 +526,7 @@ export class CodexSecurity {
       });
       checkOpen();
 
-      return await runScanEvents({
+      const result = await runScanEvents({
         thread,
         events,
         signal,
@@ -455,7 +538,25 @@ export class CodexSecurity {
         onWorkerStatus: options.onWorkerStatus,
         onObserverError: options.onObserverError,
       });
+      await workbench(workbenchOptions, ["complete-scan", "--scan-id", scanId]);
+      activeScan = null;
+      checkOpen();
+      return result;
     } catch (error) {
+      if (activeScan !== null) {
+        try {
+          await workbench({ ...activeScan.options, signal: undefined }, [
+            "fail-scan",
+            "--scan-id",
+            activeScan.id,
+            "--message",
+            (error instanceof Error ? error.message : String(error)).slice(
+              0,
+              2400,
+            ),
+          ]);
+        } catch {}
+      }
       if (this.#closed) this.#requireOpen();
       if (signal.aborted && !(error instanceof ScanInterruptedError)) {
         throwIfAborted(signal, scanDir);
@@ -748,8 +849,11 @@ export class CodexSecurity {
         environment: {
           ...withoutCodexHome(withoutApiKeys(processEnvironment)),
           CODEX_HOME: codexHome,
+          CODEX_SECURITY_STATE_DIR:
+            codexSecurityStateDirectory(processEnvironment),
         },
         credentialsAvailable,
+        effectiveConfig: mergedConfig,
       };
     } catch (error) {
       const cleanupResults = await Promise.allSettled(
@@ -943,6 +1047,8 @@ async function scanPrompt(
     'Use "$PYTHON" as <python_command> for every plugin helper; replace any literal python or python3 helper invocation with this exact interpreter.',
     'Repository root: "$CODEX_SECURITY_REPOSITORY"',
     'Use this exact scan directory for all scan output: "$CODEX_SECURITY_SCAN_DIR"',
+    'Use exactly "$CODEX_SECURITY_SCAN_ID" as the scan ID in the manifest, findings, and coverage.',
+    'Use exactly "$CODEX_SECURITY_TARGET_ID" as scan.target.targetId; do not derive a different target ID.',
     ...(hasConfigPath
       ? [
           'For normal config-preflight helper calls, append --config "$CODEX_SECURITY_CONFIG_PATH" so preflight reads the sanitized active runtime config. Preserve the documented runtime and --effective-config arguments for session-only values.',
@@ -969,6 +1075,33 @@ function targetInstruction(target: NormalizedTarget): string {
     return `Scan target: Git diff from ${target.base} to ${target.head}.`;
   }
   return `Scan target: staged and unstaged working-tree changes against ${target.base}.`;
+}
+
+function scanRecipe(
+  repository: string,
+  target: NormalizedTarget,
+  mode: ScanMode,
+  repositoryRevision: string | null,
+  pluginVersion: string,
+  effectiveConfig: JsonObject,
+  failOnSeverity?: SeverityLevel,
+): JsonObject {
+  return {
+    repository,
+    target: {
+      kind: target.kind,
+      paths: [...target.paths],
+      ...(target.base === undefined ? {} : { base: target.base }),
+      ...(target.head === undefined ? {} : { head: target.head }),
+      ...(target.baseRef === undefined ? {} : { baseRef: target.baseRef }),
+      ...(target.headRef === undefined ? {} : { headRef: target.headRef }),
+    },
+    mode,
+    ...(repositoryRevision === null ? {} : { repositoryRevision }),
+    pluginVersion,
+    config: scanPreflightCodexConfig(effectiveConfig),
+    ...(failOnSeverity === undefined ? {} : { failOnSeverity }),
+  };
 }
 
 async function collectResult(
@@ -1114,8 +1247,8 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
   const capabilityFeatures = (value: unknown): JsonObject => {
     if (!isRecord(value)) return {};
     const result: JsonObject = {};
-    if (typeof value["goals"] === "boolean") {
-      result["goals"] = value["goals"];
+    for (const key of ["goals", "multi_agent", "enable_fanout"]) {
+      if (typeof value[key] === "boolean") result[key] = value[key];
     }
     const multiAgent = value["multi_agent_v2"];
     if (typeof multiAgent === "boolean") {
@@ -1135,21 +1268,38 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     }
     return result;
   };
-
-  const result: JsonObject = {};
-  const features = capabilityFeatures(config["features"]);
-  if (Object.keys(features).length > 0) result["features"] = features;
-  const agents = config["agents"];
-  if (isRecord(agents)) {
-    const sanitized: JsonObject = {};
-    for (const key of ["max_threads", "max_depth"]) {
-      const value = agents[key];
-      if (safeInteger(value)) {
-        sanitized[key] = value;
-      }
+  const executionConfig = (source: JsonObject): JsonObject => {
+    const result: JsonObject = {};
+    for (const key of [
+      "model",
+      "model_reasoning_effort",
+      "model_provider",
+      "service_tier",
+    ]) {
+      const value = source[key];
+      if (safeString(value, 512)) result[key] = value;
     }
-    if (Object.keys(sanitized).length > 0) result["agents"] = sanitized;
-  }
+    const features = capabilityFeatures(source["features"]);
+    if (Object.keys(features).length > 0) result["features"] = features;
+    const agents = source["agents"];
+    if (isRecord(agents)) {
+      const sanitized: JsonObject = {};
+      for (const key of ["max_threads", "max_depth"]) {
+        const value = agents[key];
+        if (safeInteger(value)) sanitized[key] = value;
+      }
+      if (Object.keys(sanitized).length > 0) result["agents"] = sanitized;
+    }
+    const multiagent = source["multiagent_config"];
+    if (isRecord(multiagent) && safeInteger(multiagent["max_concurrency"])) {
+      result["multiagent_config"] = {
+        max_concurrency: multiagent["max_concurrency"],
+      };
+    }
+    return result;
+  };
+
+  const result = executionConfig(config);
   if (safeProfileName(config["profile"])) {
     result["profile"] = config["profile"];
   }
@@ -1158,10 +1308,8 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     const sanitized: JsonObject = {};
     for (const [name, profile] of Object.entries(profiles).slice(0, 256)) {
       if (!safeProfileName(name) || !isRecord(profile)) continue;
-      const profileFeatures = capabilityFeatures(profile["features"]);
-      if (Object.keys(profileFeatures).length > 0) {
-        sanitized[name] = { features: profileFeatures };
-      }
+      const projected = executionConfig(profile as JsonObject);
+      if (Object.keys(projected).length > 0) sanitized[name] = projected;
     }
     if (Object.keys(sanitized).length > 0) result["profiles"] = sanitized;
   }
@@ -1183,12 +1331,6 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
       sanitized[path] = { trust_level: trust };
     }
     if (Object.keys(sanitized).length > 0) result["projects"] = sanitized;
-  }
-  const multiagent = config["multiagent_config"];
-  if (isRecord(multiagent) && safeInteger(multiagent["max_concurrency"])) {
-    result["multiagent_config"] = {
-      max_concurrency: multiagent["max_concurrency"],
-    };
   }
   if (Buffer.byteLength(JSON.stringify(result), "utf8") > 256 * 1024) {
     throw new CodexSecurityError(
