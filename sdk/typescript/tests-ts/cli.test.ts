@@ -984,6 +984,76 @@ describe("CLI", () => {
     30_000,
   );
 
+  for (const [failure, diagnostic] of [
+    ["an asynchronous write fails", "SYNTHETIC_ASYNC_EPIPE"],
+    [
+      "the destination cannot report backpressure",
+      "cannot report backpressure safely",
+    ],
+  ] as const) {
+    test.skipIf(process.platform === "win32")(
+      `terminates a stdout exporter promptly when ${failure}`,
+      async () => {
+        const root = await mkdtemp(
+          join(tmpdir(), "codex-security-export-fail-"),
+        );
+        const fakePython = join(root, "fake-python");
+        await writeFile(
+          fakePython,
+          [
+            "#!/bin/sh",
+            'if test "$1" = "-I" && test "$2" = "-c"; then printf "codex-security-python-ok\\n"; exit 0; fi',
+            'printf "small export\\n"; sleep 8',
+            "",
+          ].join("\n"),
+          { mode: 0o700 },
+        );
+        let writes = 0;
+        const stdout =
+          failure === "an asynchronous write fails"
+            ? new Writable({
+                highWaterMark: 1024 * 1024,
+                write(_chunk, _encoding, callback) {
+                  writes += 1;
+                  setTimeout(() => callback(new Error(diagnostic)), 30);
+                },
+              })
+            : { write: () => false };
+        const stderr = capture();
+
+        try {
+          const result = await Promise.race([
+            main(
+              [
+                "export",
+                "scan",
+                "--export-format",
+                "json",
+                "--output",
+                "-",
+                "--python",
+                fakePython,
+              ],
+              stdout,
+              stderr.stream,
+            ),
+            new Promise<"timeout">((resolve) =>
+              setTimeout(() => resolve("timeout"), 3_000),
+            ),
+          ]);
+          expect(result).toBe(2);
+          if (stdout instanceof Writable) expect(writes).toBe(1);
+          expect(stderr.text()).toContain(diagnostic);
+          expect(stderr.text()).not.toContain("JSON: -");
+        } finally {
+          if (stdout instanceof Writable) stdout.destroy();
+          await rm(root, { recursive: true, force: true });
+        }
+      },
+      30_000,
+    );
+  }
+
   test.skipIf(process.platform === "win32")(
     "terminates a stdout exporter promptly when the destination fails under backpressure",
     async () => {
