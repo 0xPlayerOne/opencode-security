@@ -60,6 +60,7 @@ npx codex-security scan /path/to/repository --output-dir /path/outside/repositor
 npx codex-security scan /path/to/repository --output-dir /path/outside/repository/results --archive-existing
 npx codex-security scan /path/to/repository --dry-run
 npx codex-security scan /path/to/repository --fail-on-severity high
+npx codex-security scan-csv repositories.csv --output-dir /tmp/security-scans --workers 4
 npx codex-security export /path/outside/repository/results --export-format sarif --output results.sarif
 npx codex-security export /path/outside/repository/results --export-format csv --output findings.csv
 npx codex-security export /path/outside/repository/results --export-format json --output findings.json
@@ -93,7 +94,20 @@ Scans use `gpt-5.6-sol` with extra-high reasoning effort by default. Override
 either setting with repeatable `--codex KEY=VALUE` options, for example
 `--codex 'model="gpt-5.6-sol"' --codex 'model_reasoning_effort="high"'`.
 
-Run `npx codex-security scan --help` for the complete CLI reference.
+Run `npx codex-security scan --help` or `npx codex-security scan-csv --help`
+for the complete CLI references.
+
+Use `scan-csv` to scan repositories from a CSV manifest with required `id`,
+`repository`, and `revision` columns. Revisions must be full commit hashes;
+optional `scope` and `mode` columns narrow individual scans:
+
+```csv
+id,repository,revision,scope,mode
+service,https://github.com/acme/service.git,0123456789abcdef0123456789abcdef01234567,src,standard
+```
+
+`--workers` limits concurrent scans and `--max-attempts` retries failures.
+Results remain under `--output-dir`; rerun the same command to resume.
 
 The CLI uses [Incur](https://github.com/wevm/incur) for agent-friendly discovery
 and structured output. Inspect the command manifest with `--llms`, inspect a
@@ -102,8 +116,9 @@ server with `mcp add`, sync agent skills with `skills add`, or generate shell
 completions with `completions bash|zsh|fish`. Scan results support
 `--format toon|json|yaml|jsonl` and `--full-output`.
 Use `info --json` for SDK and bundled-plugin metadata. MCP exposes only this
-read-only metadata command; scans, authentication, exports, validation, and
-patching remain CLI-only because the MCP transport cannot cancel active scans.
+read-only metadata command; scans, CSV-based multi-repository scans,
+authentication, exports, validation, and patching remain CLI-only because the
+MCP transport cannot cancel active scans.
 
 For CI, keep machine-readable output on stdout and apply a severity policy;
 incomplete coverage and runtime errors still exit nonzero:

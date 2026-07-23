@@ -34,6 +34,7 @@ import {
   ScanInterruptedError,
 } from "./errors.js";
 import type { SeverityLevel } from "./models.js";
+import { runMultiscan } from "./multiscan.js";
 import type { ScanResult } from "./result.js";
 import {
   bundledPluginRoot,
@@ -81,6 +82,8 @@ const VALUE_OPTIONS = new Set([
   "--python",
   "--codex",
   "--fail-on-severity",
+  "--workers",
+  "--max-attempts",
   "--export-format",
   "--output",
   "--source-root",
@@ -480,6 +483,75 @@ export async function main(
         return outcome.data;
       },
     })
+    .command("scan-csv", {
+      description: "Run resumable repository scans from a CSV inventory.",
+      destructive: true,
+      mcp: false,
+      args: z.object({
+        input: z.string().min(1).describe("CSV repository inventory."),
+      }),
+      options: z.object({
+        outputDir: z
+          .string()
+          .min(1, "--output-dir must not be empty.")
+          .describe("Directory for scan artifacts and resumable results."),
+        workers: z.number().int().positive().default(4),
+        mode: z.enum(["standard", "deep"]).default("standard"),
+        maxAttempts: z
+          .number()
+          .int()
+          .positive()
+          .default(1)
+          .describe("Maximum scan attempts per repository."),
+        pluginPath: z.string().min(1).optional(),
+        python: z.string().min(1).optional(),
+        codex: z.array(z.string().min(1)).default([]),
+      }),
+      output: z.record(z.string(), z.unknown()).optional(),
+      async run({ args, options }) {
+        const controller = new AbortController();
+        const onInterrupt = (): void => controller.abort("SIGINT");
+        const onTerminate = (): void => controller.abort("SIGTERM");
+        const interruptedExitCode = (): number | undefined =>
+          controller.signal.reason === "SIGINT"
+            ? 130
+            : controller.signal.reason === "SIGTERM"
+              ? 143
+              : undefined;
+        dependencies.addSignalListener("SIGINT", onInterrupt);
+        dependencies.addSignalListener("SIGTERM", onTerminate);
+        try {
+          const currentDirectory = dependencies.currentDirectory();
+          const result = await runMultiscan({
+            inputPath: resolve(currentDirectory, args.input),
+            outputDir: resolve(currentDirectory, options.outputDir),
+            workers: options.workers,
+            mode: options.mode,
+            maxAttempts: options.maxAttempts,
+            config: {
+              pluginPath: options.pluginPath,
+              pythonPath: options.python,
+              codexOverrides: parseCodexOverrides(options.codex),
+            },
+            createSecurity: dependencies.createSecurity,
+            signal: controller.signal,
+            onProgress: ({ repository, status, attempt, error }) => {
+              errorOutput.write(
+                `codex-security: ${repository} ${status} (attempt ${attempt})${error === undefined ? "" : `: ${cliErrorMessage(error)}`}\n`,
+              );
+            },
+          });
+          exitCode = interruptedExitCode() ?? (result.failed > 0 ? 2 : 0);
+          return { ...result };
+        } catch (error) {
+          exitCode = interruptedExitCode() ?? 2;
+          errorOutput.write(`codex-security: ${cliErrorMessage(error)}\n`);
+        } finally {
+          dependencies.removeSignalListener("SIGINT", onInterrupt);
+          dependencies.removeSignalListener("SIGTERM", onTerminate);
+        }
+      },
+    })
     .command("export", {
       description:
         "Export findings from a completed scan as CSV, JSON, or SARIF.",
@@ -668,9 +740,16 @@ function validateCliArguments(
 ): string | undefined {
   if (argv.includes("--help") || argv.includes("-h")) return undefined;
   const commandIndex = argv.findIndex((value) =>
-    ["scan", "export", "validate", "patch", "login", "logout", "info"].includes(
-      value,
-    ),
+    [
+      "scan",
+      "scan-csv",
+      "export",
+      "validate",
+      "patch",
+      "login",
+      "logout",
+      "info",
+    ].includes(value),
   );
   if (commandIndex < 0) return undefined;
   const command = argv[commandIndex];

@@ -136,6 +136,7 @@ const distFiles = new Set(
     "errors",
     "index",
     "models",
+    "multiscan",
     "result",
     "runtime",
     "targets",

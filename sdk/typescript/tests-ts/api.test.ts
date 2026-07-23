@@ -1203,6 +1203,7 @@ describe("CodexSecurity orchestration", () => {
       },
     );
 
+    const scanStartedAt = Date.now();
     const result = await client.run(repository, {
       onScanStarted: () => {
         scanStarted = true;
@@ -1214,9 +1215,18 @@ describe("CodexSecurity orchestration", () => {
     expect(result.threadId).toBe("thread-1");
     expect(scanStarted).toBe(true);
     expect(reconnects).toEqual([[2, 5]]);
+    const startedAt = (codexOptions as CodexOptions | null)?.env?.[
+      "CODEX_SECURITY_STARTED_AT"
+    ];
+    if (typeof startedAt !== "string") throw new Error("missing scan start");
+    expect(new Date(startedAt).toISOString()).toBe(startedAt);
+    expect(startedAt.endsWith("Z")).toBe(true);
+    expect(Date.parse(startedAt)).toBeGreaterThanOrEqual(scanStartedAt);
+    expect(Date.parse(startedAt)).toBeLessThanOrEqual(Date.now());
     expect((codexOptions as CodexOptions | null)?.env).toMatchObject({
       CODEX_HOME: codexHome,
       PYTHON: "/managed/python",
+      CODEX_SECURITY_STARTED_AT: startedAt,
       CODEX_SECURITY_REPOSITORY: repository,
       CODEX_SECURITY_SCAN_DIR: scanDir,
       CODEX_SECURITY_PLUGIN_ROOT: PLUGIN_ROOT,
@@ -1242,12 +1252,14 @@ describe("CodexSecurity orchestration", () => {
           "LANG",
           "LC_*",
           "PYTHON",
+          "CODEX_SECURITY_STARTED_AT",
           "CODEX_SECURITY_REPOSITORY",
           "CODEX_SECURITY_SCAN_DIR",
           "CODEX_SECURITY_PLUGIN_ROOT",
         ],
         set: {
           PYTHON: "/managed/python",
+          CODEX_SECURITY_STARTED_AT: startedAt,
           CODEX_SECURITY_REPOSITORY: repository,
           CODEX_SECURITY_SCAN_DIR: scanDir,
           CODEX_SECURITY_PLUGIN_ROOT: PLUGIN_ROOT,
@@ -1582,11 +1594,13 @@ describe("CodexSecurity orchestration", () => {
     expect(environment).toMatchObject({
       PYTHON: python,
       CODEX_HOME: codexHome,
+      CODEX_SECURITY_STARTED_AT: expect.any(String),
       CODEX_SECURITY_REPOSITORY: repository,
       CODEX_SECURITY_SCAN_DIR: scanDir,
       CODEX_SECURITY_PLUGIN_ROOT: PLUGIN_ROOT,
     });
     expect(environment).not.toHaveProperty("CODEX_SECURITY_TARGET_PATHS_JSON");
+    const startedAt = environment?.["CODEX_SECURITY_STARTED_AT"];
     const targetPathsFile = environment?.["CODEX_SECURITY_TARGET_PATHS_FILE"];
     expect(typeof targetPathsFile).toBe("string");
     if (typeof targetPathsFile !== "string")
@@ -1648,6 +1662,7 @@ describe("CodexSecurity orchestration", () => {
       set: {
         CUSTOM_REQUIRED: "top-level",
         PYTHON: python,
+        CODEX_SECURITY_STARTED_AT: startedAt,
         CODEX_SECURITY_REPOSITORY: repository,
         CODEX_SECURITY_SCAN_DIR: scanDir,
         CODEX_SECURITY_PLUGIN_ROOT: PLUGIN_ROOT,
@@ -1657,6 +1672,7 @@ describe("CodexSecurity orchestration", () => {
         "PATH",
         "HOME",
         "PYTHON",
+        "CODEX_SECURITY_STARTED_AT",
         "CODEX_SECURITY_REPOSITORY",
         "CODEX_SECURITY_SCAN_DIR",
         "CODEX_SECURITY_PLUGIN_ROOT",
@@ -1696,6 +1712,7 @@ describe("CodexSecurity orchestration", () => {
       set: {
         PROFILE_REQUIRED: "profile-level",
         PYTHON: python,
+        CODEX_SECURITY_STARTED_AT: startedAt,
         CODEX_SECURITY_REPOSITORY: repository,
         CODEX_SECURITY_SCAN_DIR: scanDir,
         CODEX_SECURITY_PLUGIN_ROOT: PLUGIN_ROOT,
@@ -1703,6 +1720,7 @@ describe("CodexSecurity orchestration", () => {
       },
       include_only: [
         "PYTHON",
+        "CODEX_SECURITY_STARTED_AT",
         "CODEX_SECURITY_REPOSITORY",
         "CODEX_SECURITY_SCAN_DIR",
         "CODEX_SECURITY_PLUGIN_ROOT",

@@ -231,6 +231,36 @@ function fakeResult(
   });
 }
 
+async function multiscanInventory(root: string): Promise<void> {
+  const repository = join(root, "repository");
+  for (const args of [
+    ["init", "-q", repository],
+    [
+      "-C",
+      repository,
+      "-c",
+      "user.email=test@example.com",
+      "-c",
+      "user.name=Test",
+      "-c",
+      "commit.gpgsign=false",
+      "commit",
+      "--allow-empty",
+      "-qm",
+      "initial",
+    ],
+  ]) {
+    expect(spawnSync("git", args, { encoding: "utf8" }).status).toBe(0);
+  }
+  const revision = spawnSync("git", ["-C", repository, "rev-parse", "HEAD"], {
+    encoding: "utf8",
+  }).stdout.trim();
+  await writeFile(
+    join(root, "repositories.csv"),
+    `id,repository,revision\nsample,${repository},${revision}\n`,
+  );
+}
+
 class FakeSignals {
   readonly listeners = new Map<string, Set<() => void>>();
 
@@ -336,6 +366,8 @@ describe("CLI", () => {
     const stderr = capture();
     expect(await main([], root.stream, stderr.stream, dependencies())).toBe(0);
     expect(root.text()).toContain("Usage: codex-security <command>");
+    expect(root.text()).toContain("scan-csv");
+    expect(root.text()).not.toContain("multiscan");
     expect(root.text()).toContain("Integrations:");
     expect(root.text()).toContain("completions");
     expect(root.text()).toContain("--llms, --llms-full");
@@ -366,6 +398,7 @@ describe("CLI", () => {
       await main(["--llms"], manifest.stream, capture().stream, dependencies()),
     ).toBe(0);
     expect(manifest.text()).toContain("codex-security scan [repository]");
+    expect(manifest.text()).toContain("codex-security scan-csv <input>");
     expect(manifest.text()).toContain("codex-security export <scanDir>");
     expect(manifest.text()).toContain("codex-security validate <findings...>");
     expect(manifest.text()).toContain("codex-security patch <issues...>");
@@ -381,6 +414,89 @@ describe("CLI", () => {
       ),
     ).toBe(0);
     expect(completions.text()).toContain('export COMPLETE="bash"');
+  });
+
+  test("runs scan-csv and keeps structured output on stdout", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-cli-multiscan-"));
+    try {
+      await multiscanInventory(root);
+      const stdout = capture();
+      const stderr = capture();
+      let config: CodexSecurityConfig | undefined;
+      let scanOptions: unknown;
+      expect(
+        await main(
+          [
+            "scan-csv",
+            "repositories.csv",
+            "--output-dir",
+            "results",
+            "--mode",
+            "deep",
+            "--codex",
+            "features.goals=true",
+            "--json",
+          ],
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            currentDirectory: root,
+            onConfig: (value) => (config = value),
+            onTurn: (_repository, options) => (scanOptions = options),
+          }),
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        total: 1,
+        completed: 1,
+        failed: 0,
+        skipped: 0,
+        resultsPath: join(root, "results", "results.jsonl"),
+      });
+      expect(config).toMatchObject({
+        codexOverrides: { features: { goals: true } },
+      });
+      expect(scanOptions).toMatchObject({ mode: "deep" });
+      expect(stderr.text()).toContain("sample started (attempt 1)");
+      expect(stderr.text()).toContain("sample completed (attempt 1)");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("preserves the scan-csv failure summary and redacts progress errors", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-cli-multiscan-"));
+    try {
+      await multiscanInventory(root);
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await main(
+          ["scan-csv", "repositories.csv", "--output-dir", "results", "--json"],
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            currentDirectory: root,
+            onRun: () => {
+              throw new CodexSecurityError(
+                "scan failed sk-proj-SYNTHETIC_KEY_123",
+              );
+            },
+          }),
+        ),
+      ).toBe(2);
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        total: 1,
+        completed: 0,
+        failed: 1,
+        skipped: 0,
+      });
+      expect(stderr.text()).toContain("sample failed (attempt 1)");
+      expect(stderr.text()).toContain("[redacted]");
+      expect(stderr.text()).not.toContain("SYNTHETIC_KEY_123");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   test("exposes only typed, read-only SDK metadata over MCP", () => {

@@ -344,6 +344,7 @@ export class CodexSecurity {
           : null;
       const runtimePaths = {
         PYTHON: python,
+        CODEX_SECURITY_STARTED_AT: new Date().toISOString(),
         CODEX_SECURITY_REPOSITORY: repo,
         CODEX_SECURITY_SCAN_DIR: scanDir,
         CODEX_SECURITY_PLUGIN_ROOT: shellPluginRoot,

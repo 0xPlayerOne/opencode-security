@@ -18,7 +18,7 @@ import secrets
 import stat
 import sys
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, TextIO
 from urllib.parse import quote, urlsplit
@@ -797,6 +797,11 @@ def _populate_unsealed_manifest_envelope(
     scan["coverageRef"] = "coverage.json"
     scan["findingsRef"] = "findings.json"
     if completion_binding is None:
+        started_at = os.environ.get("CODEX_SECURITY_STARTED_AT")
+        if started_at is not None:
+            _validate_date_time(started_at, "CODEX_SECURITY_STARTED_AT")
+            scan["startedAt"] = started_at
+            scan["completedAt"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         return
 
     scan["id"] = completion_binding["scanId"]
