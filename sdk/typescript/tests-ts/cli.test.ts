@@ -291,6 +291,7 @@ function dependencies(
     onInterrupt?: () => void;
     onClose?: () => void | Promise<void>;
     onCodex?: (args: readonly string[]) => number;
+    bulkScan?: MainDependencies["bulkScan"];
     onWorkbench?: (args: readonly string[]) => JsonObject | Promise<JsonObject>;
     currentDirectory?: string;
     preflight?: ScanPreflight;
@@ -342,6 +343,7 @@ function dependencies(
     writeSynchronously: (stream, value) => stream.write(value),
     forceExit: () => {},
     runCodex: async (args) => options.onCodex?.(args) ?? 0,
+    ...(options.bulkScan === undefined ? {} : { bulkScan: options.bulkScan }),
     runWorkbench: async (args) =>
       (await options.onWorkbench?.(args)) ?? { scans: [] },
     exportFindings: async (arguments_) => {
@@ -373,7 +375,7 @@ describe("CLI", () => {
     const stderr = capture();
     expect(await main([], root.stream, stderr.stream, dependencies())).toBe(0);
     expect(root.text()).toContain("Usage: codex-security <command>");
-    expect(root.text()).toContain("scan-csv");
+    expect(root.text()).toContain("bulk-scan");
     expect(root.text()).not.toContain("multiscan");
     expect(root.text()).toContain("Integrations:");
     expect(root.text()).toContain("completions");
@@ -405,7 +407,7 @@ describe("CLI", () => {
       await main(["--llms"], manifest.stream, capture().stream, dependencies()),
     ).toBe(0);
     expect(manifest.text()).toContain("codex-security scan [repository]");
-    expect(manifest.text()).toContain("codex-security scan-csv <input>");
+    expect(manifest.text()).toContain("codex-security bulk-scan [input]");
     expect(manifest.text()).toContain("codex-security export <scanDir>");
     expect(manifest.text()).toContain("codex-security validate <findings...>");
     expect(manifest.text()).toContain("codex-security patch <issues...>");
@@ -429,7 +431,7 @@ describe("CLI", () => {
     expect(completions.text()).toContain('export COMPLETE="bash"');
   });
 
-  test("runs scan-csv and keeps structured output on stdout", async () => {
+  test("runs a bulk scan and keeps structured output on stdout", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-cli-multiscan-"));
     try {
       await multiscanInventory(root);
@@ -440,7 +442,7 @@ describe("CLI", () => {
       expect(
         await main(
           [
-            "scan-csv",
+            "bulk-scan",
             "repositories.csv",
             "--output-dir",
             "results",
@@ -477,7 +479,7 @@ describe("CLI", () => {
     }
   });
 
-  test("preserves the scan-csv failure summary and redacts progress errors", async () => {
+  test("preserves the bulk-scan failure summary and redacts progress errors", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-cli-multiscan-"));
     try {
       await multiscanInventory(root);
@@ -485,7 +487,13 @@ describe("CLI", () => {
       const stderr = capture();
       expect(
         await main(
-          ["scan-csv", "repositories.csv", "--output-dir", "results", "--json"],
+          [
+            "bulk-scan",
+            "repositories.csv",
+            "--output-dir",
+            "results",
+            "--json",
+          ],
           stdout.stream,
           stderr.stream,
           dependencies({
@@ -507,6 +515,84 @@ describe("CLI", () => {
       expect(stderr.text()).toContain("sample failed (attempt 1)");
       expect(stderr.text()).toContain("[redacted]");
       expect(stderr.text()).not.toContain("SYNTHETIC_KEY_123");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("requires a terminal for a bulk scan without a repository list", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    let started = false;
+
+    expect(
+      await main(
+        ["bulk-scan"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({ onRun: () => (started = true) }),
+      ),
+    ).toBe(2);
+    expect(started).toBe(false);
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain("requires a terminal");
+  });
+
+  test("requires an output directory for a supplied bulk scan CSV", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["bulk-scan", "repositories.csv"],
+        stdout.stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("--output-dir is required");
+    expect(stdout.text()).toBe("");
+  });
+
+  test("starts an existing-CSV bulk scan after interactive confirmation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-cli-bulk-scan-"));
+    try {
+      await multiscanInventory(root);
+      const stdout = capture();
+      const stderr = capture();
+      const confirmations = [true, true];
+      const answers = ["repositories.csv", "results"];
+      const wizard: NonNullable<MainDependencies["bulkScan"]> = {
+        prompt: {
+          isInteractive: () => true,
+          write: (value) => {
+            stderr.stream.write(value);
+          },
+          confirm: async () => confirmations.shift() ?? false,
+          input: async () => answers.shift() ?? "",
+          select: async (_question, options) => options[0]!.value,
+          multiSelect: async (_question, _options, defaults = []) => [
+            ...defaults,
+          ],
+        },
+        now: () => 0,
+        currentDirectory: () => root,
+        runGitHub: async () => {
+          throw new Error("GitHub should not run for an existing CSV.");
+        },
+      };
+
+      expect(
+        await main(
+          ["bulk-scan"],
+          stdout.stream,
+          stderr.stream,
+          dependencies({ currentDirectory: root, bulkScan: wizard }),
+        ),
+      ).toBe(0);
+      expect(stdout.text()).toContain("completed");
+      expect(stderr.text()).toContain("sample started (attempt 1)");
+      expect(stderr.text()).toContain("sample completed (attempt 1)");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

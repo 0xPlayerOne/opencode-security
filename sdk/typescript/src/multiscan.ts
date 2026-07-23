@@ -45,6 +45,7 @@ interface MultiscanReceipt extends MultiscanTask {
 export interface MultiscanOptions {
   inputPath: string;
   outputDir: string;
+  githubHost?: string;
   workers: number;
   mode: ScanMode;
   maxAttempts: number;
@@ -67,6 +68,21 @@ export interface MultiscanResult {
   failed: number;
   skipped: number;
   resultsPath: string;
+}
+
+export async function inspectMultiscanInventory(
+  inputPath: string,
+  mode: ScanMode = "standard",
+): Promise<{ total: number; repositories: string[] }> {
+  const tasks = parseInventory(
+    await readFile(inputPath, "utf8"),
+    dirname(resolve(inputPath)),
+    mode,
+  );
+  return {
+    total: tasks.length,
+    repositories: tasks.map((task) => task.id),
+  };
 }
 
 export async function runMultiscan(
@@ -157,7 +173,12 @@ async function runCampaign(
           await mkdir(dirname(scanDir), { recursive: true, mode: 0o700 });
           await rm(checkout, { recursive: true, force: true });
           await mkdir(checkout, { mode: 0o700 });
-          await checkoutRevision(task, checkout, options.signal);
+          await checkoutRevision(
+            task,
+            checkout,
+            options.signal,
+            options.githubHost,
+          );
           if (task.scope !== undefined) {
             const scoped = await realpath(join(checkout, task.scope));
             const outside = relative(await realpath(checkout), scoped);
@@ -436,6 +457,7 @@ async function checkoutRevision(
   task: MultiscanTask,
   path: string,
   signal?: AbortSignal,
+  githubHost?: string,
 ): Promise<void> {
   const environment = { ...process.env };
   for (const name of [
@@ -460,7 +482,14 @@ async function checkoutRevision(
   const git = async (...args: string[]): Promise<string> => {
     const result = await execFile(
       "git",
-      ["-c", "core.hooksPath=/dev/null", "-C", path, ...args],
+      [
+        "-c",
+        "core.hooksPath=/dev/null",
+        ...buildGitHubCredentialArgs(githubHost),
+        "-C",
+        path,
+        ...args,
+      ],
       { env: command.environment, signal },
     );
     return result.stdout.trim();
@@ -479,6 +508,28 @@ async function checkoutRevision(
   if ((await git("rev-parse", "HEAD")).toLowerCase() !== task.revision) {
     throw new Error("Git checkout revision did not match the pinned SHA.");
   }
+}
+
+export function buildGitHubCredentialArgs(host: string | undefined): string[] {
+  if (host === undefined) return [];
+  let url: URL;
+  try {
+    url = new URL(`https://${host}`);
+  } catch {
+    throw new Error("GitHub credential host is invalid.");
+  }
+  if (
+    url.host !== host.toLowerCase() ||
+    url.pathname !== "/" ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
+  ) {
+    throw new Error("GitHub credential host is invalid.");
+  }
+  const key = `credential.${url.origin}.helper`;
+  return ["-c", `${key}=`, "-c", `${key}=!gh auth git-credential`];
 }
 
 function redactError(error: unknown): string {

@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import type { ScanResult } from "../src/result.js";
-import { runMultiscan } from "../src/multiscan.js";
+import { buildGitHubCredentialArgs, runMultiscan } from "../src/multiscan.js";
 
 type MultiscanOptions = Parameters<typeof runMultiscan>[0];
 type SecurityClient = ReturnType<MultiscanOptions["createSecurity"]>;
@@ -120,6 +120,65 @@ async function results(path: string): Promise<Record<string, unknown>[]> {
 }
 
 describe("multiscan", () => {
+  test("scopes GitHub CLI credentials to the discovered GitHub host", () => {
+    expect(buildGitHubCredentialArgs(undefined)).toEqual([]);
+    expect(buildGitHubCredentialArgs("github.com")).toEqual([
+      "-c",
+      "credential.https://github.com.helper=",
+      "-c",
+      "credential.https://github.com.helper=!gh auth git-credential",
+    ]);
+    expect(buildGitHubCredentialArgs("github.acme.example")).toEqual([
+      "-c",
+      "credential.https://github.acme.example.helper=",
+      "-c",
+      "credential.https://github.acme.example.helper=!gh auth git-credential",
+    ]);
+    for (const host of [
+      "github.com/another-owner",
+      "user@github.com",
+      "github.com?token=secret",
+      "github.com#fragment",
+    ]) {
+      expect(() => buildGitHubCredentialArgs(host)).toThrow(
+        "GitHub credential host is invalid",
+      );
+    }
+  });
+
+  test("uses GitHub credentials for discovered checkouts without changing global Git configuration", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "github-credentials");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nprivate,${source.path},${source.revision}\n`,
+    );
+    const configured = execFileSync(
+      "git",
+      [
+        ...buildGitHubCredentialArgs("github.acme.example"),
+        "config",
+        "--get-all",
+        "credential.https://github.acme.example.helper",
+      ],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+    expect(configured.trim()).toBe("!gh auth git-credential");
+
+    const summary = await runMultiscan(
+      options(
+        paths,
+        client(
+          async (_checkout, scanOptions = {}) =>
+            await completedScan(scanOptions.outputDir!),
+        ),
+        { githubHost: "github.acme.example" },
+      ),
+    );
+
+    expect(summary).toMatchObject({ total: 1, completed: 1, failed: 0 });
+  });
+
   test("parses quoted CSV fields, embedded delimiters, and Windows line endings", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "comma, quoted");

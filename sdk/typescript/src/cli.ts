@@ -27,6 +27,12 @@ import { pathToFileURL } from "node:url";
 import { Cli, z } from "incur";
 import { parse as parseToml } from "smol-toml";
 import { CodexSecurity, type ScanOptions, type ScanPreflight } from "./api.js";
+import {
+  BulkScanInterruptedError,
+  createBulkScanDiscoveryDependencies,
+  runBulkScanWizard,
+  type BulkScanDiscoveryDependencies,
+} from "./bulk-scan-discovery.js";
 import type { CodexSecurityConfig, JsonObject, JsonValue } from "./config.js";
 import {
   CodexSecurityError,
@@ -151,6 +157,7 @@ interface CliDependencies {
     output?: Writable,
   ): Promise<Uint8Array | undefined>;
   runCodex(args: readonly string[]): Promise<number>;
+  bulkScan?: BulkScanDiscoveryDependencies;
   runWorkbench(args: readonly string[]): Promise<JsonObject>;
 }
 
@@ -649,17 +656,23 @@ export async function main(
       },
     })
     .command(scanHistory)
-    .command("scan-csv", {
-      description: "Run resumable repository scans from a CSV inventory.",
+    .command("bulk-scan", {
+      description:
+        "Discover repositories and run resumable bulk security scans.",
       destructive: true,
       mcp: false,
       args: z.object({
-        input: z.string().min(1).describe("CSV repository inventory."),
+        input: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("CSV repository list; omit to discover repositories."),
       }),
       options: z.object({
         outputDir: z
           .string()
           .min(1, "--output-dir must not be empty.")
+          .optional()
           .describe("Directory for scan artifacts and resumable results."),
         workers: z.number().int().positive().default(4),
         mode: z.enum(["standard", "deep"]).default("standard"),
@@ -688,9 +701,41 @@ export async function main(
         dependencies.addSignalListener("SIGTERM", onTerminate);
         try {
           const currentDirectory = dependencies.currentDirectory();
+          let inputPath: string;
+          let outputDir: string;
+          let githubHost: string | undefined;
+          if (args.input === undefined) {
+            if (argv.length !== 1 || argv[0] !== "bulk-scan") {
+              throw new Error(
+                "Run 'codex-security bulk-scan' without options to discover repositories, or provide a CSV and --output-dir.",
+              );
+            }
+            const wizard = await runBulkScanWizard(
+              dependencies.bulkScan ??
+                createBulkScanDiscoveryDependencies({
+                  output: errorOutput,
+                  now: dependencies.now,
+                  currentDirectory: dependencies.currentDirectory,
+                }),
+              controller.signal,
+            );
+            if (wizard === null) return;
+            inputPath = wizard.inputPath;
+            outputDir = wizard.outputDir;
+            githubHost = wizard.githubHost;
+          } else {
+            if (options.outputDir === undefined) {
+              throw new Error(
+                "--output-dir is required with a repository CSV.",
+              );
+            }
+            inputPath = resolve(currentDirectory, args.input);
+            outputDir = resolve(currentDirectory, options.outputDir);
+          }
           const result = await runMultiscan({
-            inputPath: resolve(currentDirectory, args.input),
-            outputDir: resolve(currentDirectory, options.outputDir),
+            inputPath,
+            outputDir,
+            ...(githubHost === undefined ? {} : { githubHost }),
             workers: options.workers,
             mode: options.mode,
             maxAttempts: options.maxAttempts,
@@ -710,7 +755,9 @@ export async function main(
           exitCode = interruptedExitCode() ?? (result.failed > 0 ? 2 : 0);
           return { ...result };
         } catch (error) {
-          exitCode = interruptedExitCode() ?? 2;
+          exitCode =
+            interruptedExitCode() ??
+            (error instanceof BulkScanInterruptedError ? 130 : 2);
           errorOutput.write(`codex-security: ${cliErrorMessage(error)}\n`);
         } finally {
           dependencies.removeSignalListener("SIGINT", onInterrupt);
@@ -1035,8 +1082,8 @@ function validateCliArguments(
   const commandIndex = argv.findIndex((value) =>
     [
       "scan",
+      "bulk-scan",
       "scans",
-      "scan-csv",
       "export",
       "validate",
       "patch",

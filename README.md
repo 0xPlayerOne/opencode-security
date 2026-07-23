@@ -47,6 +47,8 @@ npx codex-security scan /path/to/repo --output-dir /path/outside/repo/results
 npx codex-security scan /path/to/repo --output-dir /path/outside/repo/results --archive-existing
 npx codex-security scan /path/to/repo --dry-run
 npx codex-security scan /path/to/repo --fail-on-severity high
+npx codex-security bulk-scan
+npx codex-security bulk-scan repositories.csv --output-dir ./security-scans
 npx codex-security scans list /path/to/repo
 npx codex-security scans list --scan-root /path/outside/repo/results
 npx codex-security scans show SCAN_ID
@@ -63,6 +65,18 @@ The output directory must be outside the scanned directory and any enclosing Git
 worktree. When SARIF is produced, it is written to
 `<scan-dir>/exports/results.sarif`. Use `npx codex-security scan --help` for all
 target, output, and runtime options.
+
+Run `npx codex-security bulk-scan` in an interactive terminal to discover
+GitHub repositories, review the matches, and confirm before starting a scan.
+The default selection includes private and internal repositories pushed in the
+last 90 days. Select **Something else** to filter by repository-name keywords,
+activity, primary language, and one or more visibility levels. Private and
+internal visibility are selected by default. Private repository checkouts reuse
+your GitHub CLI sign-in without changing your global Git configuration.
+Archived repositories and forks are always excluded. For automation or an
+existing repository list, pass a CSV containing `id`, `repository`, and full
+immutable `revision` columns and specify `--output-dir`. Use
+`npx codex-security bulk-scan --help` for all options.
 
 The CLI uses [Incur](https://github.com/wevm/incur) for agent-friendly discovery
 and structured output. Use `--llms` for the command manifest,

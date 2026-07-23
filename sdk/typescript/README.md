@@ -60,12 +60,13 @@ npx codex-security scan /path/to/repository --output-dir /path/outside/repositor
 npx codex-security scan /path/to/repository --output-dir /path/outside/repository/results --archive-existing
 npx codex-security scan /path/to/repository --dry-run
 npx codex-security scan /path/to/repository --fail-on-severity high
+npx codex-security bulk-scan
+npx codex-security bulk-scan repositories.csv --output-dir /tmp/security-scans --workers 4
 npx codex-security scans list /path/to/repository
 npx codex-security scans list --scan-root /path/outside/repository/results
 npx codex-security scans show SCAN_ID
 npx codex-security scans rerun SCAN_ID
 npx codex-security scans compare PREVIOUS_SCAN_ID CURRENT_SCAN_ID
-npx codex-security scan-csv repositories.csv --output-dir /tmp/security-scans --workers 4
 npx codex-security export /path/outside/repository/results --export-format sarif --output results.sarif
 npx codex-security export /path/outside/repository/results --export-format csv --output findings.csv
 npx codex-security export /path/outside/repository/results --export-format json --output findings.json
@@ -99,10 +100,23 @@ Scans use `gpt-5.6-sol` with extra-high reasoning effort by default. Override
 either setting with repeatable `--codex KEY=VALUE` options, for example
 `--codex 'model="gpt-5.6-sol"' --codex 'model_reasoning_effort="high"'`.
 
-Run `npx codex-security scan --help` or `npx codex-security scan-csv --help`
+Run `npx codex-security scan --help` or `npx codex-security bulk-scan --help`
 for the complete CLI references.
 
-Use `scan-csv` to scan repositories from a CSV manifest with required `id`,
+Run `npx codex-security bulk-scan` in an interactive terminal to discover
+repositories through an authenticated GitHub CLI. The default selection
+includes private and internal repositories pushed in the last 90 days and
+excludes archived repositories and forks. Select **Something else** to choose
+repository-name keywords, an activity window, a primary language, and
+one or more repository visibility levels. Private and internal repositories
+are selected by default, and multiple name keywords match any of the specified
+terms. Private repository checkouts reuse your GitHub CLI sign-in without
+changing your global Git configuration. Review the matching repositories and
+choose an output directory; scanning starts only after you confirm. The
+selected repositories are recorded in `<output-dir>/repositories.csv` so the
+scan can be reviewed or resumed.
+
+To use an existing repository list or run in CI, pass a CSV with required `id`,
 `repository`, and `revision` columns. Revisions must be full commit hashes;
 optional `scope` and `mode` columns narrow individual scans:
 
@@ -141,7 +155,7 @@ server with `mcp add`, sync agent skills with `skills add`, or generate shell
 completions with `completions bash|zsh|fish`. Scan results support
 `--format toon|json|yaml|jsonl` and `--full-output`.
 Use `info --json` for SDK and bundled-plugin metadata. MCP exposes only this
-read-only metadata command; scans, CSV-based multi-repository scans,
+read-only metadata command; scans, bulk repository scans,
 authentication, exports, validation, and patching remain CLI-only because the
 MCP transport cannot cancel active scans.
 
