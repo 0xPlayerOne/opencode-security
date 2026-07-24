@@ -35,6 +35,7 @@ except ModuleNotFoundError:  # pragma: no cover - msvcrt is only available on Wi
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import deep_scan_workbench as deep_scan
+import workbench_native_indexes as native_indexes
 import workbench_progress as progress
 import workbench_remediation as remediation
 import workbench_scan_history as scan_history
@@ -100,6 +101,7 @@ from workbench_target import (
 )
 from workbench_target_state import backfill_security_targets, ensure_security_target
 from workbench_validation import (
+    bounded_output_text,
     capability_preflight_input,
     capability_preflight_json,
     optional_text,
@@ -3281,11 +3283,6 @@ def scan_local_regular_file(scan_dir: Path, relative_path: str) -> bool:
         os.close(descriptor)
 
 
-def bounded_output_text(value: Any, maximum_bytes: int) -> str:
-    encoded = str(value).encode("utf-8")[:maximum_bytes]
-    return encoded.decode("utf-8", errors="ignore")
-
-
 def read_finding_details(value: str) -> dict[str, Any]:
     try:
         details = json.loads(value, parse_constant=reject_non_finite_json)
@@ -3579,6 +3576,14 @@ def main() -> None:
                 args,
                 require_scan=require_scan,
                 read_coverage=coverage_for_comparison,
+            )
+        elif args.command == "list-global-findings":
+            result = native_indexes.list_global_findings(
+                connection, args, read_coverage=coverage_for_comparison
+            )
+        elif args.command == "list-repositories":
+            result = native_indexes.list_repositories(
+                connection, read_coverage=coverage_for_comparison
             )
         elif args.command == "list-findings":
             result = list_findings(connection, args)

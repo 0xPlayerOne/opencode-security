@@ -243,6 +243,11 @@ def _normalize_preflight_patch(value: Any, index: int) -> dict[str, Any]:
     return normalized
 
 
+def bounded_output_text(value: Any, maximum_bytes: int) -> str:
+    encoded = str(value).encode("utf-8")[:maximum_bytes]
+    return encoded.decode("utf-8", errors="ignore")
+
+
 def require_occurrence(connection: sqlite3.Connection, occurrence_id: str) -> sqlite3.Row:
     occurrence_id = optional_text(occurrence_id, maximum=256)
     if occurrence_id is None:

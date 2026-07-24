@@ -182,7 +182,12 @@ def compare_scans(
         elif not comparable:
             status = "unknown"
             item["reason"] = "The later scan has a different target or incomplete coverage."
-        elif not _path_is_covered(previous["relative_path"], after_coverage):
+        elif not scan_covers_path(
+            after,
+            target_id=before["target_id"],
+            path=previous["relative_path"],
+            coverage=after_coverage,
+        ):
             status = "unknown"
             item["reason"] = "The affected path was excluded or outside the later scope."
         else:
@@ -231,7 +236,19 @@ def _scan_findings(connection: sqlite3.Connection, scan_id: str) -> dict[str, sq
     return {row["finding_id"]: row for row in rows}
 
 
-def _path_is_covered(path: str | None, coverage: dict[str, Any]) -> bool:
+def scan_covers_path(
+    scan: sqlite3.Row,
+    *,
+    target_id: str,
+    path: str | None,
+    coverage: dict[str, Any],
+) -> bool:
+    if (
+        scan["status"] != "complete"
+        or scan["target_id"] != target_id
+        or coverage.get("completeness") != "complete"
+    ):
+        return False
     if not isinstance(path, str) or not path:
         return False
     included = coverage.get("includePaths")

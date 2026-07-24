@@ -151,6 +151,10 @@ def parse_args(description: str) -> argparse.Namespace:
     compare_scans = subparsers.add_parser("compare-scans")
     compare_scans.add_argument("--before-scan-id", required=True)
     compare_scans.add_argument("--after-scan-id", required=True)
+    list_global_findings = subparsers.add_parser("list-global-findings")
+    list_global_findings.add_argument("--offset", type=non_negative_int, default=0)
+    list_global_findings.add_argument("--limit", type=positive_int, default=FINDINGS_PAGE_MAX)
+    subparsers.add_parser("list-repositories")
 
     list_findings = subparsers.add_parser("list-findings")
     list_findings.add_argument("--scan-id", required=True)
