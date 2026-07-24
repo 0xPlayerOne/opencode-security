@@ -735,6 +735,7 @@ describe("CLI", () => {
               mode: "deep",
               pluginVersion: "1.2.3",
               failOnSeverity: "high",
+              knowledgeBasePaths: ["/original/security.md"],
               config: savedConfig,
             },
           }),
@@ -749,6 +750,7 @@ describe("CLI", () => {
       parentScanId: "scan-original",
       expectedPluginVersion: "1.2.3",
       failureSeverity: "high",
+      knowledgeBasePaths: ["/original/security.md"],
     });
 
     const references: Array<[JsonObject, ReturnType<typeof DiffTarget.refs>]> =
@@ -1950,7 +1952,7 @@ describe("CLI", () => {
 
   test("parses repeatable options and every scan target through Incur", async () => {
     const pathOutput = capture();
-    let pathTarget: unknown;
+    let pathOptions: unknown;
     let pathConfig: CodexSecurityConfig | undefined;
     expect(
       await main(
@@ -1960,6 +1962,9 @@ describe("CLI", () => {
           "--path",
           "src",
           "--path=--fixtures",
+          "--knowledge-base",
+          "/shared/architecture.pdf",
+          "--knowledge-base=/shared/threat-models",
           "--mode",
           "deep",
           "--plugin-path",
@@ -1975,13 +1980,14 @@ describe("CLI", () => {
         capture().stream,
         dependencies({
           onConfig: (config) => (pathConfig = config),
-          onTurn: (_repository, options) => {
-            pathTarget = (options as { target?: unknown }).target;
-          },
+          onTurn: (_repository, options) => (pathOptions = options),
         }),
       ),
     ).toBe(0);
-    expect(pathTarget).toEqual(["src", "--fixtures"]);
+    expect(pathOptions).toMatchObject({
+      target: ["src", "--fixtures"],
+      knowledgeBasePaths: ["/shared/architecture.pdf", "/shared/threat-models"],
+    });
     expect(pathConfig).toMatchObject({
       pluginPath: "plugin.zip",
       pythonPath: "/managed/python",

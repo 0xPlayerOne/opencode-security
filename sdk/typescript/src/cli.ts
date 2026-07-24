@@ -80,6 +80,7 @@ const EXPORT_DEFAULT_OUTPUTS = {
 } as const;
 const VALUE_OPTIONS = new Set([
   "--path",
+  "--knowledge-base",
   "--diff",
   "--head",
   "--base",
@@ -108,6 +109,7 @@ function optionValue(flag: string) {
 interface ScanArguments {
   repository?: string;
   paths: string[];
+  knowledgeBasePaths: string[];
   diff?: string;
   workingTree: boolean;
   head?: string;
@@ -538,6 +540,10 @@ export async function main(
             .array(optionValue("--path"))
             .default([])
             .describe("Scan only PATH; repeat for multiple paths."),
+          knowledgeBase: z
+            .array(optionValue("--knowledge-base"))
+            .default([])
+            .describe("Read security docs; repeat for multiple paths."),
           diff: optionValue("--diff")
             .optional()
             .describe("Scan Git changes from BASE to --head."),
@@ -627,6 +633,7 @@ export async function main(
           {
             repository: args.repository,
             paths: options.path,
+            knowledgeBasePaths: options.knowledgeBase,
             diff: options.diff,
             workingTree: options.workingTree,
             head: options.head,
@@ -1007,6 +1014,17 @@ function scanArgumentsFromRecipe(
       "The saved scan recipe contains invalid paths.",
     );
   }
+  const knowledgeBasePaths = recipe["knowledgeBasePaths"] ?? [];
+  if (
+    !Array.isArray(knowledgeBasePaths) ||
+    !knowledgeBasePaths.every(
+      (path): path is string => typeof path === "string" && path.length > 0,
+    )
+  ) {
+    throw new CodexSecurityError(
+      "The saved scan recipe contains invalid knowledge base paths.",
+    );
+  }
   const kind = target["kind"];
   if (
     kind !== "repository" &&
@@ -1058,6 +1076,7 @@ function scanArgumentsFromRecipe(
   return {
     repository,
     paths,
+    knowledgeBasePaths,
     diff: kind === "refs" ? reference : undefined,
     workingTree: kind === "working_tree",
     head: kind === "refs" ? head ?? "HEAD" : undefined,
@@ -1403,6 +1422,7 @@ async function runScan(
     security = dependencies.createSecurity(config);
     const options: ScanOptions = {
       target,
+      knowledgeBasePaths: arguments_.knowledgeBasePaths,
       mode: arguments_.mode,
       outputDir: arguments_.outputDir,
       archiveExisting: arguments_.archiveExisting,

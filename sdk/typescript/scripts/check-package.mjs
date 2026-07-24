@@ -136,6 +136,7 @@ const distFiles = new Set(
     "contract",
     "errors",
     "index",
+    "knowledge-base",
     "models",
     "multiscan",
     "result",

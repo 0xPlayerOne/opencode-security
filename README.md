@@ -42,6 +42,7 @@ Scan a subset of a repository or write machine-readable results:
 
 ```bash
 npx codex-security scan /path/to/repo --path src --path tests
+npx codex-security scan /path/to/repo --knowledge-base /path/to/threat-models --knowledge-base /path/to/architecture.pdf
 npx codex-security scan /path/to/repo --diff origin/main --json
 npx codex-security scan /path/to/repo --output-dir /path/outside/repo/results
 npx codex-security scan /path/to/repo --output-dir /path/outside/repo/results --archive-existing
@@ -65,6 +66,9 @@ The output directory must be outside the scanned directory and any enclosing Git
 worktree. When SARIF is produced, it is written to
 `<scan-dir>/exports/results.sarif`. Use `npx codex-security scan --help` for all
 target, output, and runtime options.
+
+Repeat `--knowledge-base PATH` for multiple files or directories. Directories are
+searched recursively for Markdown, text, PDF, and Word (`.docx`) files.
 
 Sign in with `gh auth login`, then run `npx codex-security bulk-scan` to discover
 GitHub repositories pushed in the last 90 days. Archived
@@ -165,7 +169,9 @@ import { CodexSecurity } from "@openai/codex-security";
 
 const security = new CodexSecurity();
 try {
-  const result = await security.run("/path/to/repo");
+  const result = await security.run("/path/to/repo", {
+    knowledgeBasePaths: ["/path/to/threat-models", "/path/to/architecture.pdf"],
+  });
   console.log(result.reportPath);
 } finally {
   await security.close();

@@ -55,6 +55,7 @@ An environment API key takes precedence over a stored sign-in. Unset both
 ```bash
 npx codex-security scan /path/to/repository
 npx codex-security scan /path/to/repository --path src --path tests
+npx codex-security scan /path/to/repository --knowledge-base /path/to/threat-models --knowledge-base /path/to/architecture.pdf
 npx codex-security scan /path/to/repository --diff origin/main --json
 npx codex-security scan /path/to/repository --output-dir /path/outside/repository/results
 npx codex-security scan /path/to/repository --output-dir /path/outside/repository/results --archive-existing
@@ -80,6 +81,9 @@ repository and path targets. The output directory must be outside the scanned
 directory and any enclosing Git worktree. When SARIF is produced, it is written
 to
 `<scan-dir>/exports/results.sarif`.
+
+Repeat `--knowledge-base PATH` for multiple files or directories. Directories are
+searched recursively for Markdown, text, PDF, and Word (`.docx`) files.
 
 On macOS/Linux, an existing output directory must be private to the current
 user (`chmod 700`).
@@ -198,7 +202,9 @@ import { CodexSecurity } from "@openai/codex-security";
 
 const security = new CodexSecurity();
 try {
-  const result = await security.run("/path/to/repository");
+  const result = await security.run("/path/to/repository", {
+    knowledgeBasePaths: ["/path/to/threat-models", "/path/to/architecture.pdf"],
+  });
   console.log(result.reportPath);
 } finally {
   await security.close();

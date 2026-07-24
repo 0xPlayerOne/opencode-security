@@ -10,6 +10,7 @@
         "CODEX_API_KEY",
         "CODEX_CLI_PATH",
         "PYTHON",
+        "CODEX_SECURITY_KNOWLEDGE_BASE",
         "CODEX_SECURITY_SCAN_ROOT",
         "CODEX_SECURITY_STATE_DIR"
       ],
