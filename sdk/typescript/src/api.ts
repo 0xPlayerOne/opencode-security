@@ -14,6 +14,7 @@ import {
 } from "./auth.js";
 import {
   mergedCodexConfig,
+  scanModelConfiguration,
   type CodexSecurityConfig,
   type JsonObject,
   writeCodexConfig,
@@ -151,9 +152,12 @@ export interface ScanPreflight {
   knowledgeBasePaths?: string[];
   outputDir: string | null;
   archiveDir?: string;
+  model: string;
+  reasoningEffort: string;
 }
 
-interface LocalScanInputs extends ScanPreflight {
+interface LocalScanInputs
+  extends Omit<ScanPreflight, "model" | "reasoningEffort"> {
   protectedRoot: string;
 }
 
@@ -234,7 +238,7 @@ export class CodexSecurity {
       await realpath(tmpdir()),
       "temporary",
     );
-    await mergedCodexConfig(this.config);
+    const configuration = await mergedCodexConfig(this.config);
     const archiveDir =
       options.archiveExisting === true
         ? await planOutputArchive(inputs.outputDir)
@@ -249,6 +253,7 @@ export class CodexSecurity {
         : {}),
       outputDir: inputs.outputDir,
       ...(archiveDir === null ? {} : { archiveDir }),
+      ...scanModelConfiguration(configuration),
     };
   }
 

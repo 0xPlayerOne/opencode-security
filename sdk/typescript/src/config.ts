@@ -16,6 +16,11 @@ export interface CodexSecurityConfig {
   pythonPath?: string;
 }
 
+export interface ScanModelConfiguration {
+  model: string;
+  reasoningEffort: string;
+}
+
 export const DEFAULT_CODEX_CONFIG: Readonly<JsonObject> = {
   cli_auth_credentials_store: "file",
   model: "gpt-5.6-sol",
@@ -31,6 +36,27 @@ export const DEFAULT_CODEX_CONFIG: Readonly<JsonObject> = {
 };
 
 deepFreezeJson(DEFAULT_CODEX_CONFIG);
+
+export function scanModelConfiguration(
+  config: Readonly<JsonObject>,
+): ScanModelConfiguration {
+  const model = config["model"];
+  if (typeof model !== "string" || model.trim().length === 0) {
+    throw new ConfigurationError(
+      "The configured Codex model must be a nonempty string.",
+    );
+  }
+  const reasoningEffort = config["model_reasoning_effort"];
+  if (
+    typeof reasoningEffort !== "string" ||
+    reasoningEffort.trim().length === 0
+  ) {
+    throw new ConfigurationError(
+      "The configured Codex reasoning effort must be a nonempty string.",
+    );
+  }
+  return { model, reasoningEffort };
+}
 
 export async function mergedCodexConfig(
   config: CodexSecurityConfig,

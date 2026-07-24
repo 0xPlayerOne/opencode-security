@@ -42,6 +42,9 @@ import {
   exportEnvironment,
   parseCodexOverrides,
   Progress,
+  readSkillCommandOutput,
+  runCodexSkillCommand,
+  skillCommandFailure,
 } from "../src/cli.js";
 
 type MainDependencies = NonNullable<Parameters<typeof main>[3]>;
@@ -174,12 +177,15 @@ function fakePreflight(repository = "/current/repository"): ScanPreflight {
     target: { kind: "repository", paths: [] },
     mode: "standard",
     outputDir: null,
+    model: "gpt-5.6-sol",
+    reasoningEffort: "xhigh",
   };
 }
 
 function fakeResult(
   severityLevels: readonly SeverityLevel[] = [],
   completeness: CoverageDocument["completeness"] = "complete",
+  usage: unknown = null,
 ): ScanResult {
   const manifest = {
     documentType: "codex-security.scan-manifest",
@@ -232,7 +238,7 @@ function fakeResult(
     turnResult: {
       status: "completed",
       finalResponse: "done",
-      usage: null,
+      usage,
     },
   });
 }
@@ -603,6 +609,12 @@ describe("CLI", () => {
       sdkVersion: VERSION,
       bundledPluginVersion: BUNDLED_PLUGIN_VERSION,
       scanMcp: false,
+      cliVersion: VERSION,
+      codexVersion: "0.144.6",
+      codexSdkVersion: "0.144.6",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "xhigh",
+      nextStep: "codex-security scan . --dry-run",
     });
   }, 30_000);
 
@@ -844,6 +856,30 @@ describe("CLI", () => {
     expect(started).toBe(false);
   });
 
+  test("filters useful first-run metadata without starting Codex", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.createSecurity = () => {
+      throw new Error("info must stay local and read-only");
+    };
+
+    expect(
+      await main(
+        ["info", "--json", "--filter-output", "model,reasoningEffort,nextStep"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual({
+      model: "gpt-5.6-sol",
+      reasoningEffort: "xhigh",
+      nextStep: "codex-security scan . --dry-run",
+    });
+    expect(stderr.text()).toBe("");
+  });
+
   test("rejects scan-only filters before running the info command", async () => {
     const stdout = capture();
     const stderr = capture();
@@ -1055,6 +1091,19 @@ describe("CLI", () => {
         ).toBe(status);
         expect(invocation.slice(0, -1)).toEqual([
           "exec",
+          "--ignore-user-config",
+          "--disable",
+          "plugins",
+          "--ephemeral",
+          "--color",
+          "never",
+          "--json",
+          "--config",
+          'model="gpt-5.6-sol"',
+          "--config",
+          'model_reasoning_effort="xhigh"',
+          "--config",
+          'approval_policy="never"',
           "--sandbox",
           "workspace-write",
           "--skip-git-repo-check",
@@ -1087,9 +1136,270 @@ describe("CLI", () => {
         expect(help.text()).toContain(
           `Usage: codex-security ${command} <${argument}>`,
         );
+        expect(help.text()).toContain("--codex <array>");
       }
     } finally {
       await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("applies bounded model and reasoning overrides to validation and patching", async () => {
+    for (const command of ["validate", "patch"] as const) {
+      let invocation: readonly string[] = [];
+      const stderr = capture();
+      expect(
+        await main(
+          [
+            command,
+            "a candidate finding",
+            "--codex",
+            'model="gpt-5.6-custom"',
+            "--codex",
+            'model_reasoning_effort="high"',
+          ],
+          capture().stream,
+          stderr.stream,
+          dependencies({
+            onCodex: (args) => {
+              invocation = args;
+              return 0;
+            },
+          }),
+        ),
+      ).toBe(0);
+      expect(invocation).toContain('model="gpt-5.6-custom"');
+      expect(invocation).toContain('model_reasoning_effort="high"');
+      expect(stderr.text()).toBe("");
+    }
+
+    const longLiteral =
+      "This candidate finding has enough context to exceed a filesystem name. ".repeat(
+        8,
+      );
+    let literalInvocation: readonly string[] = [];
+    expect(
+      await main(
+        ["validate", longLiteral],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          currentDirectory: process.cwd(),
+          onCodex: (args) => {
+            literalInvocation = args;
+            return 0;
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(literalInvocation.at(-1)!.split("\n").at(-1)!)).toEqual([
+      longLiteral,
+    ]);
+
+    for (const override of [
+      "features.goals=false",
+      "model_reasoning_effort=5",
+      'model="  "',
+    ]) {
+      let started = false;
+      const stderr = capture();
+      expect(
+        await main(
+          ["validate", "finding", "--codex", override],
+          capture().stream,
+          stderr.stream,
+          dependencies({
+            onCodex: () => {
+              started = true;
+              return 0;
+            },
+          }),
+        ),
+      ).toBe(2);
+      expect(stderr.text()).toContain("codex-security:");
+      expect(started).toBe(false);
+    }
+  });
+
+  test("rejects empty, non-file, and oversized skill inputs before launching Codex", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "codex-security-skill-inputs-"),
+    );
+    try {
+      await mkdir(join(directory, "nested"));
+      await writeFile(
+        join(directory, "oversized.txt"),
+        Buffer.alloc(1024 * 1024 + 1),
+      );
+      await writeFile(join(directory, "empty.txt"), " \n\t");
+      const invalidInputs = [
+        ["   ", "must not be empty"],
+        ["nested", "must be files or literal text"],
+        ["empty.txt", "must not be empty"],
+        ["oversized.txt", "exceeds the 1 MiB limit"],
+        ["x".repeat(1024 * 1024 + 1), "exceeds the 1 MiB limit"],
+      ];
+      for (const [input, expected] of invalidInputs) {
+        let started = false;
+        const stderr = capture();
+        expect(
+          await main(
+            ["validate", input!],
+            capture().stream,
+            stderr.stream,
+            dependencies({
+              currentDirectory: directory,
+              onCodex: () => {
+                started = true;
+                return 0;
+              },
+            }),
+          ),
+        ).toBe(2);
+        expect(stderr.text()).toContain(expected!);
+        expect(started).toBe(false);
+      }
+
+      let started = false;
+      const tooMany = capture();
+      expect(
+        await main(
+          ["patch", ...Array.from({ length: 65 }, () => "issue")],
+          capture().stream,
+          tooMany.stream,
+          dependencies({
+            currentDirectory: directory,
+            onCodex: () => {
+              started = true;
+              return 0;
+            },
+          }),
+        ),
+      ).toBe(2);
+      expect(tooMany.text()).toContain("64-item limit");
+      expect(started).toBe(false);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("extracts the final skill response without exposing intermediate events", async () => {
+    async function* events(): AsyncGenerator<Buffer> {
+      yield Buffer.from(
+        '{"type":"thread.started","thread_id":"private-thread"}\n',
+      );
+      yield Buffer.from(
+        '{"type":"error","message":"Reconnecting... 2/5"}\n' +
+          '{"type":"item.completed","item":{"type":"agent_message","text":"intermediate"}}\n',
+      );
+      yield Buffer.from(
+        '{"type":"item.completed","item":{"type":"agent_message","text":"Validated finding"}}\n',
+      );
+    }
+
+    await expect(readSkillCommandOutput(events())).resolves.toEqual({
+      message: "Validated finding",
+      error: "Reconnecting... 2/5",
+      malformed: false,
+    });
+
+    async function* failed(): AsyncGenerator<Buffer> {
+      yield Buffer.from("a non-json provider transcript\n");
+      yield Buffer.from(
+        '{"type":"turn.failed","error":{"message":"401 sk-proj-SYNTHETIC_SECRET"}}\n',
+      );
+    }
+    await expect(readSkillCommandOutput(failed())).resolves.toEqual({
+      error: "401 sk-proj-SYNTHETIC_SECRET",
+      malformed: true,
+    });
+
+    async function* unicode(): AsyncGenerator<Buffer> {
+      const bytes = Buffer.from(
+        `${JSON.stringify({
+          type: "item.completed",
+          item: { type: "agent_message", text: "Café 🔒" },
+        })}\n`,
+      );
+      const accent = bytes.indexOf(Buffer.from("é"));
+      yield bytes.subarray(0, accent + 1);
+      yield bytes.subarray(accent + 1);
+    }
+    await expect(readSkillCommandOutput(unicode())).resolves.toEqual({
+      message: "Café 🔒",
+      malformed: false,
+    });
+  });
+
+  test("summarizes skill failures without echoing credentials or private paths", () => {
+    const cases = [
+      ["401 sk-proj-SYNTHETIC_SECRET", "Authentication failed"],
+      [
+        "403 model access denied /private/repository",
+        "selected model is unavailable",
+      ],
+      ["429 tokens per minute sk-proj-SYNTHETIC_SECRET", "rate limited"],
+      [
+        "models cache supports_reasoning_summaries /private/home",
+        "model metadata",
+      ],
+      ["ENOTFOUND /private/repository", "could not connect"],
+      ["unknown sk-proj-SYNTHETIC_SECRET /private/repository", "exit code 7"],
+    ];
+    for (const [detail, expected] of cases) {
+      const message = skillCommandFailure("validate", 7, detail!);
+      expect(message).toContain(expected!);
+      expect(message).not.toContain("SYNTHETIC_SECRET");
+      expect(message).not.toContain("/private");
+    }
+  });
+
+  test("forwards only completed skill output and redacts subprocess diagnostics", async () => {
+    const cases = [
+      {
+        source:
+          'process.stderr.write("unrelated plugin warning sk-proj-SYNTHETIC_SECRET\\n");' +
+          'process.stdout.write(JSON.stringify({type:"thread.started",thread_id:"private-thread"})+"\\n");' +
+          'process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"Validated finding"}})+"\\n")',
+        status: 0,
+        stdout: "Validated finding\n",
+        stderr: "",
+      },
+      {
+        source:
+          'process.stderr.write("/private/repository sk-proj-SYNTHETIC_SECRET\\n");' +
+          'process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:"401 sk-proj-SYNTHETIC_SECRET"}})+"\\n");' +
+          "process.exitCode=7",
+        status: 7,
+        stdout: "",
+        stderr: "Authentication failed",
+      },
+      {
+        source:
+          'process.stdout.write(JSON.stringify({type:"turn.completed"})+"\\n")',
+        status: 2,
+        stdout: "",
+        stderr: "did not return a completed validate response",
+      },
+    ];
+
+    for (const scenario of cases) {
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await runCodexSkillCommand(
+          [],
+          { command: "validate", stdout: stdout.stream, stderr: stderr.stream },
+          { command: process.execPath, prefixArgs: ["-e", scenario.source] },
+        ),
+      ).toBe(scenario.status);
+      expect(stdout.text()).toBe(scenario.stdout);
+      if (scenario.stderr === "") {
+        expect(stderr.text()).toBe("");
+      } else {
+        expect(stderr.text()).toContain(scenario.stderr);
+      }
+      expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
+      expect(stderr.text()).not.toContain("/private");
     }
   });
 
@@ -2431,6 +2741,102 @@ describe("CLI", () => {
     expect(stderr.text()).toContain(
       "Worker capacity changed during ranking; started 3 of 6 planned workers. Continuing scan.",
     );
+  });
+
+  test("reports scoped scan phases and deduplicates repeated worker updates", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const status = {
+      kind: "dispatch",
+      phase: "file_review",
+      planned: 4,
+      started: 4,
+    } as const;
+
+    expect(
+      await main(
+        ["scan", ".", "--path", "src", "--path", "tests", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({ workerStatuses: [status, status] }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain("Running scan: src, tests");
+    expect(stderr.text()).toContain("Scan phase: reviewing files (4 workers).");
+    expect(stderr.text().match(/Scan phase: reviewing files/g)).toHaveLength(1);
+    expect(stderr.text()).toContain(
+      "Running scan: reviewing files (src, tests)",
+    );
+    expect(stderr.text()).not.toContain("% complete");
+  });
+
+  test("prints a truthful completion summary without changing JSON results", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const result = fakeResult(
+      ["critical", "high", "high", "informational"],
+      "complete",
+      {
+        input_tokens: 1250,
+        cached_input_tokens: 200,
+        output_tokens: 30,
+      },
+    );
+
+    expect(
+      await main(
+        ["scan", ".", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          result,
+          workerStatuses: [
+            { kind: "dispatch", phase: "validation", planned: 6, started: 3 },
+          ],
+        }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
+    expect(stderr.text()).toContain(
+      "Findings: 4 (1 critical, 2 high, 1 informational). Coverage: complete.",
+    );
+    expect(stderr.text()).toContain("Elapsed: 1s. Workers: 3/6.");
+    expect(stderr.text()).toContain(
+      "Tokens: 1,250 input, 200 cached, 30 output.",
+    );
+    expect(stderr.text()).toContain("Results: /tmp/scan");
+    expect(stderr.text()).toContain(
+      "Next: codex-security export /tmp/scan --export-format sarif",
+    );
+  });
+
+  test("keeps scan progress scope and completion paths redacted", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const result = fakeResult();
+    Object.defineProperty(result, "scanDir", {
+      value: "/tmp/scan_sk-proj-SYNTHETIC_OUTPUT_KEY_123",
+    });
+
+    expect(
+      await main(
+        [
+          "scan",
+          ".",
+          "--path",
+          "src/sk-proj-SYNTHETIC_SCOPE_KEY_123",
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        dependencies({ result }),
+      ),
+    ).toBe(0);
+    expect(stderr.text()).not.toContain("SYNTHETIC_SCOPE_KEY_123");
+    expect(stderr.text()).not.toContain("SYNTHETIC_OUTPUT_KEY_123");
+    expect(stderr.text()).toContain("src/[redacted]");
+    expect(stderr.text()).toContain("/tmp/scan_[redacted]");
   });
 
   test("reports parent fallback when delegated workers cannot start", async () => {

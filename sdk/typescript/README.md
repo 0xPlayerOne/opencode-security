@@ -78,6 +78,12 @@ npx codex-security validate findings.json "Possible SQL injection in src/query.t
 npx codex-security patch findings.json "Missing authorization check in src/routes.ts:18"
 ```
 
+Run `npx codex-security --version` for the installed CLI version or
+`npx codex-security info --json` for the package, bundled plugin, Codex runtime,
+default model, reasoning effort, and first-scan command. A scan with `--dry-run`
+also reports its effective model and reasoning effort, including `--codex`
+overrides, without starting Codex or contacting the network.
+
 `--path` scopes a scan to one or more paths, `--diff` scans committed changes,
 and `--working-tree` scans staged and unstaged changes. Deep scans support
 repository and path targets. The output directory must be outside the scanned
@@ -106,6 +112,12 @@ mode.
 Scans use `gpt-5.6-sol` with extra-high reasoning effort by default. Override
 either setting with repeatable `--codex KEY=VALUE` options, for example
 `--codex 'model="gpt-5.6-sol"' --codex 'model_reasoning_effort="high"'`.
+
+Scan progress identifies the requested paths and reports actual ranking,
+file-review, validation, and attack-path phases as they become available.
+Completion summarizes findings, severity, coverage, elapsed time, available
+token and worker counts, the results directory, and the next useful command.
+Progress and summaries use stderr; structured scan results remain on stdout.
 
 Run `npx codex-security scan --help` or `npx codex-security bulk-scan --help`
 for the complete CLI references.
@@ -169,8 +181,8 @@ npx codex-security scan . --diff origin/main --json --fail-on-severity high > co
 ```
 
 JSON scans never use interactive terminal controls, even when stderr is a TTY.
-The `validate`, `patch`, `login`, and `logout` commands run Codex interactively
-and reject `--json` rather than mixing its terminal output with machine data.
+The `validate`, `patch`, `login`, and `logout` commands reject `--json` because
+they do not produce structured CLI output. Sign-in commands remain interactive.
 CSV exports cannot be written to stdout while JSON output is requested.
 
 Use `export` to create CSV, JSON, or SARIF from a completed, sealed scan without
@@ -184,7 +196,12 @@ Run `npx codex-security export --help` for all export options.
 Use `validate` to run the bundled validation skill on candidate findings and
 `patch` to run the bundled fix-finding skill on security issues. Each positional
 input can be either a file, whose contents are read into the request, or literal
-text. Both commands operate on the current directory.
+text. Both commands operate on the current directory, use the scan model
+and reasoning defaults, ignore unrelated user configuration and plugins, and
+print the final response without the underlying Codex event stream. Override
+the model or reasoning effort with `--codex 'model="gpt-5.6-sol"'` or
+`--codex 'model_reasoning_effort="high"'`. Inputs are limited to 64 items and
+1 MiB total.
 
 Canonical scan documents are limited to 16 MiB for the manifest, 128 MiB for
 findings, and 32 MiB for coverage. Oversized scans are rejected before sealing.

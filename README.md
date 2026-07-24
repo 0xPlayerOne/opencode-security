@@ -64,6 +64,12 @@ npx codex-security validate findings.json "Possible SQL injection in src/query.t
 npx codex-security patch findings.json "Missing authorization check in src/routes.ts:18"
 ```
 
+Use `npx codex-security --version` for the CLI version and
+`npx codex-security info --json` for package, plugin, and runtime versions,
+the default model and reasoning effort, and the next scan command. Add
+`--dry-run` to inspect the effective model and reasoning effort without
+initializing Codex or contacting the network.
+
 The output directory must be outside the scanned directory and any enclosing Git
 worktree. When SARIF is produced, it is written to
 `<scan-dir>/exports/results.sarif`. Use `npx codex-security scan --help` for all
@@ -123,6 +129,11 @@ either setting, pass valid TOML values (including quotes for strings):
 ```bash
 npx codex-security scan . --codex 'model="gpt-5.6-sol"' --codex 'model_reasoning_effort="high"'
 ```
+
+Scans report their requested paths and actual ranking, file-review, validation,
+and attack-path phases. Completion shows finding severity, coverage, elapsed
+time, available token and worker counts, the results directory, and the next
+useful command. Progress remains on stderr; JSON results remain on stdout.
 
 ## Scan history and reruns
 

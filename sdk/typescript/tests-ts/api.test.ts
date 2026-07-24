@@ -837,6 +837,8 @@ describe("CodexSecurity orchestration", () => {
       target: { kind: "paths", paths: ["src"] },
       mode: "deep",
       outputDir: output,
+      model: "gpt-5.6-sol",
+      reasoningEffort: "xhigh",
     });
     await expect(
       client.preflight(repository, { outputDir: join(repository, "scan") }),
@@ -856,6 +858,35 @@ describe("CodexSecurity orchestration", () => {
     await invalidConfig.close();
     expect(runtimeStarted).toBe(false);
     await expect(stat(output)).rejects.toThrow();
+    await client.close();
+  });
+
+  test("reports configured model and reasoning during local-only preflight", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    let runtimeStarted = false;
+    const client = new TestClient(
+      {
+        codexOverrides: {
+          model: "configured-model",
+          model_reasoning_effort: "high",
+        },
+      },
+      {
+        environment: { OPENAI_API_KEY: "must-not-be-used" },
+        prepareRuntime: async () => {
+          runtimeStarted = true;
+          throw new Error("runtime should not initialize");
+        },
+      },
+    );
+
+    await expect(client.preflight(repository)).resolves.toMatchObject({
+      model: "configured-model",
+      reasoningEffort: "high",
+    });
+    expect(runtimeStarted).toBe(false);
     await client.close();
   });
 
@@ -892,6 +923,25 @@ describe("CodexSecurity orchestration", () => {
     ).rejects.toThrow();
     expect(runtimeStarted).toBe(false);
     await client.close();
+  });
+
+  test("rejects unusable model settings during local-only preflight", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+
+    for (const codexOverrides of [
+      { model: "" },
+      { model: 42 },
+      { model_reasoning_effort: "" },
+      { model_reasoning_effort: false },
+    ]) {
+      const client = new TestClient({ codexOverrides }, { environment: {} });
+      await expect(client.preflight(repository)).rejects.toThrow(
+        /model|reasoning effort/u,
+      );
+      await client.close();
+    }
   });
 
   test("previews an existing output archive without changing files", async () => {
