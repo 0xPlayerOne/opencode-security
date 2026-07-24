@@ -133,7 +133,13 @@ export async function runWorkbench(
         ...args,
       ],
       {
-        env: withoutApiKeyCredentials(options.environment),
+        env: Object.fromEntries(
+          Object.entries(options.environment).filter(
+            ([name]) =>
+              name.toUpperCase() !== "OPENAI_API_KEY" &&
+              name.toUpperCase() !== "CODEX_API_KEY",
+          ),
+        ),
         encoding: "utf8",
         maxBuffer: 4 * 1024 * 1024,
         windowsHide: true,
@@ -769,7 +775,7 @@ export async function bootstrapPlugin(
   const marketplace = await createMarketplace(codexHome, root, options.signal);
   const command = options.codexCommand ?? resolveCodexCommand();
   const environment = {
-    ...withoutApiKeyCredentials(options.environment ?? process.env),
+    ...(options.environment ?? process.env),
     CODEX_HOME: codexHome,
   };
   const run = options.runCodex ?? runCodex;
@@ -801,21 +807,6 @@ export async function bootstrapPlugin(
     name,
     version,
   };
-}
-
-function withoutApiKeyCredentials(
-  environment: ProcessEnvironment,
-): ProcessEnvironment {
-  const sanitized = { ...environment };
-  for (const name of Object.keys(sanitized)) {
-    if (
-      name.toUpperCase() === "OPENAI_API_KEY" ||
-      name.toUpperCase() === "CODEX_API_KEY"
-    ) {
-      delete sanitized[name];
-    }
-  }
-  return sanitized;
 }
 
 export async function pluginMetadata(

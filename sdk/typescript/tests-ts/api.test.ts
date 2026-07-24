@@ -1337,43 +1337,6 @@ describe("CodexSecurity orchestration", () => {
     expect((codexOptions as CodexOptions | null)?.config).toMatchObject({
       default_permissions: "codex_security_scan",
       allow_login_shell: false,
-      shell_environment_policy: {
-        include_only: [
-          "PATH",
-          "HOME",
-          "USER",
-          "USERPROFILE",
-          "HOMEDRIVE",
-          "HOMEPATH",
-          "TMP",
-          "TEMP",
-          "TMPDIR",
-          "SYSTEMROOT",
-          "WINDIR",
-          "COMSPEC",
-          "PATHEXT",
-          "LANG",
-          "LC_*",
-          "PYTHON",
-          "CODEX_SECURITY_STARTED_AT",
-          "CODEX_SECURITY_REPOSITORY",
-          "CODEX_SECURITY_SCAN_DIR",
-          "CODEX_SECURITY_PLUGIN_ROOT",
-          "CODEX_SECURITY_STATE_DIR",
-          "CODEX_SECURITY_SCAN_ID",
-          "CODEX_SECURITY_TARGET_ID",
-        ],
-        set: {
-          PYTHON: "/managed/python",
-          CODEX_SECURITY_STARTED_AT: startedAt,
-          CODEX_SECURITY_REPOSITORY: repository,
-          CODEX_SECURITY_SCAN_DIR: scanDir,
-          CODEX_SECURITY_PLUGIN_ROOT: PLUGIN_ROOT,
-          CODEX_SECURITY_STATE_DIR: expect.any(String),
-          CODEX_SECURITY_SCAN_ID: expect.any(String),
-          CODEX_SECURITY_TARGET_ID: expect.any(String),
-        },
-      },
     });
     expect(threadOptions as Record<string, unknown> | null).toEqual({
       workingDirectory: scanDir,
@@ -1622,12 +1585,7 @@ describe("CodexSecurity orchestration", () => {
               expect(serialized).not.toContain("shell_environment_policy");
               expect(input).toContain('--config "$CODEX_SECURITY_CONFIG_PATH"');
               expect(input).toContain("--effective-config");
-              const configured = options.config as Record<string, unknown>;
-              const policy = configured["shell_environment_policy"] as Record<
-                string,
-                unknown
-              >;
-              const shellEnvironment = policy["set"] as Record<string, string>;
+              const shellEnvironment = options.env as Record<string, string>;
               const helper = execFileSync(
                 interpreter!,
                 [
@@ -1882,7 +1840,6 @@ describe("CodexSecurity orchestration", () => {
       CODEX_SECURITY_PLUGIN_ROOT: PLUGIN_ROOT,
     });
     expect(environment).not.toHaveProperty("CODEX_SECURITY_TARGET_PATHS_JSON");
-    const startedAt = environment?.["CODEX_SECURITY_STARTED_AT"];
     const targetPathsFile = environment?.["CODEX_SECURITY_TARGET_PATHS_FILE"];
     expect(typeof targetPathsFile).toBe("string");
     if (typeof targetPathsFile !== "string")
@@ -1907,120 +1864,6 @@ describe("CodexSecurity orchestration", () => {
     if (process.platform !== "win32") {
       expect((await stat(capturedTargetPathsFile)).mode & 0o777).toBe(0o400);
     }
-    const shellPolicy = (
-      (codexOptions as CodexOptions | null)?.config as {
-        shell_environment_policy?: {
-          inherit?: string;
-          ignore_default_excludes?: boolean;
-          exclude?: string[];
-          set?: Record<string, string>;
-          include_only?: string[];
-        };
-        profiles?: Record<
-          string,
-          {
-            shell_environment_policy?: {
-              inherit?: string;
-              ignore_default_excludes?: boolean;
-              exclude?: string[];
-              set?: Record<string, string>;
-              include_only?: string[];
-            };
-          }
-        >;
-      }
-    ).shell_environment_policy;
-    expect(shellPolicy).toMatchObject({
-      inherit: "none",
-      ignore_default_excludes: false,
-      exclude: [
-        "OPENAI_*",
-        "CUSTOM_SECRET",
-        "CODEX_HOME",
-        "*KEY*",
-        "*SECRET*",
-        "*TOKEN*",
-      ],
-      set: {
-        CUSTOM_REQUIRED: "top-level",
-        PYTHON: python,
-        CODEX_SECURITY_STARTED_AT: startedAt,
-        CODEX_SECURITY_REPOSITORY: repository,
-        CODEX_SECURITY_SCAN_DIR: scanDir,
-        CODEX_SECURITY_PLUGIN_ROOT: PLUGIN_ROOT,
-        CODEX_SECURITY_STATE_DIR: expect.any(String),
-        CODEX_SECURITY_SCAN_ID: expect.any(String),
-        CODEX_SECURITY_TARGET_ID: expect.any(String),
-        CODEX_SECURITY_TARGET_PATHS_FILE: targetPathsFile,
-      },
-      include_only: [
-        "PATH",
-        "HOME",
-        "PYTHON",
-        "CODEX_SECURITY_STARTED_AT",
-        "CODEX_SECURITY_REPOSITORY",
-        "CODEX_SECURITY_SCAN_DIR",
-        "CODEX_SECURITY_PLUGIN_ROOT",
-        "CODEX_SECURITY_STATE_DIR",
-        "CODEX_SECURITY_SCAN_ID",
-        "CODEX_SECURITY_TARGET_ID",
-        "CODEX_SECURITY_TARGET_PATHS_FILE",
-      ],
-    });
-    const profiles = (
-      (codexOptions as CodexOptions | null)?.config as {
-        profiles?: Record<
-          string,
-          {
-            model?: string;
-            model_reasoning_effort?: string;
-            shell_environment_policy?: {
-              inherit?: string;
-              ignore_default_excludes?: boolean;
-              exclude?: string[];
-              set?: Record<string, string>;
-              include_only?: string[];
-            };
-          }
-        >;
-      }
-    ).profiles;
-    expect(profiles).toMatchObject({
-      locked: { model: "locked-model", model_reasoning_effort: "low" },
-      inherited: { model: "inherited-model", model_reasoning_effort: "high" },
-    });
-    expect(profiles?.["inherited"]).not.toHaveProperty(
-      "shell_environment_policy",
-    );
-    const profilePolicy = profiles?.["locked"]?.shell_environment_policy;
-    expect(profilePolicy).toMatchObject({
-      inherit: "none",
-      ignore_default_excludes: false,
-      exclude: ["PROFILE_SECRET", "CODEX_HOME", "*KEY*", "*SECRET*", "*TOKEN*"],
-      set: {
-        PROFILE_REQUIRED: "profile-level",
-        PYTHON: python,
-        CODEX_SECURITY_STARTED_AT: startedAt,
-        CODEX_SECURITY_REPOSITORY: repository,
-        CODEX_SECURITY_SCAN_DIR: scanDir,
-        CODEX_SECURITY_PLUGIN_ROOT: PLUGIN_ROOT,
-        CODEX_SECURITY_STATE_DIR: expect.any(String),
-        CODEX_SECURITY_SCAN_ID: expect.any(String),
-        CODEX_SECURITY_TARGET_ID: expect.any(String),
-        CODEX_SECURITY_TARGET_PATHS_FILE: targetPathsFile,
-      },
-      include_only: [
-        "PYTHON",
-        "CODEX_SECURITY_STARTED_AT",
-        "CODEX_SECURITY_REPOSITORY",
-        "CODEX_SECURITY_SCAN_DIR",
-        "CODEX_SECURITY_PLUGIN_ROOT",
-        "CODEX_SECURITY_STATE_DIR",
-        "CODEX_SECURITY_SCAN_ID",
-        "CODEX_SECURITY_TARGET_ID",
-        "CODEX_SECURITY_TARGET_PATHS_FILE",
-      ],
-    });
     expect(prompt).toContain('Repository root: "$CODEX_SECURITY_REPOSITORY"');
     expect(prompt).toContain(
       'Use this exact scan directory for all scan output: "$CODEX_SECURITY_SCAN_DIR"',
@@ -2061,7 +1904,7 @@ describe("CodexSecurity orchestration", () => {
           env: {
             PATH: process.env["PATH"],
             HOME: process.env["HOME"],
-            ...shellPolicy?.set,
+            ...environment,
             CODEX_SECURITY_TARGET_PATHS_FILE: capturedTargetPathsFile,
           },
           encoding: "utf8",
@@ -2289,7 +2132,7 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("persists an ambient API key without exposing it to scan commands", async () => {
+  test("persists an ambient API key without filtering Codex-owned credentials", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
@@ -2333,8 +2176,8 @@ if (process.argv.slice(2).join(" ") !== "login --with-api-key") {
           },
           environment: {
             CODEX_HOME: codexHome,
-            OpenAi_Api_Key: "must-not-reach-a-child",
-            codex_api_key: "must-not-reach-a-child",
+            OpenAi_Api_Key: "forwarded-openai-key",
+            codex_api_key: "forwarded-codex-key",
           },
           credentialsAvailable: false,
         }),
@@ -2372,20 +2215,15 @@ if (process.argv.slice(2).join(" ") !== "login --with-api-key") {
     expect(
       (codexOptions as CodexOptions | null)?.codexPathOverride,
     ).toBeUndefined();
-    expect(
-      Object.keys((codexOptions as CodexOptions | null)?.env ?? {}).some(
-        (name) =>
-          name.toUpperCase() === "OPENAI_API_KEY" ||
-          name.toUpperCase() === "CODEX_API_KEY",
-      ),
-    ).toBe(false);
-    expect(
-      Object.keys(pythonEnvironment ?? {}).some(
-        (name) =>
-          name.toUpperCase() === "OPENAI_API_KEY" ||
-          name.toUpperCase() === "CODEX_API_KEY",
-      ),
-    ).toBe(false);
+    expect((codexOptions as CodexOptions | null)?.env).toMatchObject({
+      OpenAi_Api_Key: "forwarded-openai-key",
+      codex_api_key: "forwarded-codex-key",
+    });
+    expect(pythonEnvironment).toMatchObject({
+      openai_api_key: "stale-key",
+      OPENAI_API_KEY: "ambient-key",
+      Codex_Api_Key: "secondary-key",
+    });
     expect(pythonProtectedRoot).toBe(await realpath(repository));
     await client.close();
   });
@@ -2921,7 +2759,7 @@ appendFileSync(${JSON.stringify(keyLog)}, apiKey.trim() + "\\n");
     await expect(login.wait()).resolves.toMatchObject({ success: false });
   });
 
-  test("clears a cached API key after successful ChatGPT login", async () => {
+  test("keeps ambient credentials available after successful ChatGPT login", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
@@ -2993,12 +2831,10 @@ if (args === "login --with-api-key") {
     await expect(login.wait()).resolves.toMatchObject({ success: true });
     await client.run(repository);
     expect((codexOptions as CodexOptions | null)?.apiKey).toBeUndefined();
-    expect(
-      (codexOptions as CodexOptions | null)?.env?.["OPENAI_API_KEY"],
-    ).toBeUndefined();
-    expect(
-      (codexOptions as CodexOptions | null)?.env?.["CODEX_API_KEY"],
-    ).toBeUndefined();
+    expect((codexOptions as CodexOptions | null)?.env).toMatchObject({
+      OPENAI_API_KEY: "ambient-key",
+      CODEX_API_KEY: "secondary-ambient-key",
+    });
     await client.close();
   });
 

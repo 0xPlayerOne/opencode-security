@@ -297,7 +297,7 @@ export class CodexSecurity {
         const codexCommand = this.#codexCommand();
         const login = await persistApiKey(
           codexCommand,
-          withoutApiKeys(runtime.environment),
+          runtime.environment,
           apiKey,
           signal,
         );
@@ -319,7 +319,7 @@ export class CodexSecurity {
         this.#dependencies.resolvePluginPython ?? resolvePluginPython
       )({
         configuredPath: this.config.pythonPath,
-        environment: withoutApiKeys(this.#dependencies.environment),
+        environment: this.#dependencies.environment,
         protectedRoot,
         signal,
       });
@@ -457,30 +457,10 @@ export class CodexSecurity {
           ? {}
           : { CODEX_SECURITY_TARGET_PATHS_FILE: targetPathsFile }),
       };
-      const configuredProfiles = this.config.codexOverrides?.["profiles"];
-      const profilePolicies = isCodexConfigObject(configuredProfiles)
-        ? Object.fromEntries(
-            Object.entries(configuredProfiles).map(([name, profile]) =>
-              isCodexConfigObject(profile) &&
-              isCodexConfigObject(profile["shell_environment_policy"])
-                ? [
-                    name,
-                    {
-                      ...profile,
-                      shell_environment_policy: shellEnvironmentPolicy(
-                        profile["shell_environment_policy"],
-                        runtimePaths,
-                      ),
-                    },
-                  ]
-                : [name, profile],
-            ),
-          )
-        : {};
       const environment = {
         ...pluginExecutionEnvironment(
           python,
-          withoutCodexHome(withoutApiKeys(runtime.environment)),
+          withoutCodexHome(runtime.environment),
         ),
         CODEX_HOME: runtime.codexHome,
         ...runtimePaths,
@@ -490,13 +470,6 @@ export class CodexSecurity {
         config: {
           default_permissions: SCAN_PERMISSION_PROFILE,
           allow_login_shell: false,
-          shell_environment_policy: shellEnvironmentPolicy(
-            this.config.codexOverrides?.["shell_environment_policy"],
-            runtimePaths,
-          ),
-          ...(Object.keys(profilePolicies).length > 0
-            ? { profiles: profilePolicies }
-            : {}),
         },
       });
       const thread = codex.startThread({
@@ -573,7 +546,7 @@ export class CodexSecurity {
         runtime: preparedRuntime,
         result: await persistApiKey(
           this.#codexCommand(),
-          withoutApiKeys(preparedRuntime.environment),
+          preparedRuntime.environment,
           apiKey,
           signal,
         ),
@@ -851,7 +824,7 @@ export class CodexSecurity {
         configPath,
         plugin,
         environment: {
-          ...withoutCodexHome(withoutApiKeys(processEnvironment)),
+          ...withoutCodexHome(processEnvironment),
           CODEX_HOME: codexHome,
           CODEX_SECURITY_STATE_DIR:
             codexSecurityStateDirectory(processEnvironment),
@@ -1204,12 +1177,6 @@ function reconnectAttempt(message: string): [number, number] | null {
   return attempt <= maxAttempts ? [attempt, maxAttempts] : null;
 }
 
-function isCodexConfigObject(
-  value: unknown,
-): value is NonNullable<CodexOptions["config"]> {
-  return isRecord(value);
-}
-
 export function scanRuntimeCodexConfig(config: JsonObject): JsonObject {
   const hardened = structuredClone(config);
   delete hardened["sandbox_mode"];
@@ -1344,87 +1311,6 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
   return result;
 }
 
-function shellEnvironmentPolicy(
-  policy: unknown,
-  runtimePaths: Record<string, string>,
-): NonNullable<CodexOptions["config"]> {
-  const configured = isCodexConfigObject(policy) ? policy : {};
-  const configuredSet = isCodexConfigObject(configured["set"])
-    ? configured["set"]
-    : {};
-  const includeOnly = configured["include_only"];
-  const exclude = configured["exclude"];
-  return {
-    ...configured,
-    ignore_default_excludes: false,
-    exclude: [
-      ...new Set([
-        ...(Array.isArray(exclude)
-          ? exclude.filter(
-              (value): value is string => typeof value === "string",
-            )
-          : []),
-        "CODEX_HOME",
-        "*KEY*",
-        "*SECRET*",
-        "*TOKEN*",
-      ]),
-    ],
-    set: {
-      ...Object.fromEntries(
-        Object.entries(configuredSet).filter(([key]) =>
-          safeShellEnvironmentName(key),
-        ),
-      ),
-      ...runtimePaths,
-    },
-    include_only: [
-      ...new Set([
-        ...(Array.isArray(includeOnly)
-          ? includeOnly.filter(
-              (value): value is string =>
-                typeof value === "string" && safeShellEnvironmentPattern(value),
-            )
-          : [
-              "PATH",
-              "HOME",
-              "USER",
-              "USERPROFILE",
-              "HOMEDRIVE",
-              "HOMEPATH",
-              "TMP",
-              "TEMP",
-              "TMPDIR",
-              "SYSTEMROOT",
-              "WINDIR",
-              "COMSPEC",
-              "PATHEXT",
-              "LANG",
-              "LC_*",
-            ]),
-        ...Object.keys(runtimePaths),
-      ]),
-    ],
-  };
-}
-
-function safeShellEnvironmentName(value: string): boolean {
-  const upper = value.toUpperCase();
-  return (
-    upper !== "CODEX_HOME" &&
-    !upper.includes("KEY") &&
-    !upper.includes("SECRET") &&
-    !upper.includes("TOKEN")
-  );
-}
-
-function safeShellEnvironmentPattern(value: string): boolean {
-  return (
-    safeShellEnvironmentName(value) &&
-    (/^[A-Za-z_][A-Za-z0-9_]*$/.test(value) || value === "LC_*")
-  );
-}
-
 function requireOutputOutsideRepository(
   repository: string,
   outputDirectory: string,
@@ -1459,18 +1345,6 @@ function definedEnvironment(
   return Object.fromEntries(
     Object.entries(environment).filter(
       (entry): entry is [string, string] => entry[1] !== undefined,
-    ),
-  );
-}
-
-function withoutApiKeys(
-  environment: ProcessEnvironment,
-): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(definedEnvironment(environment)).filter(
-      ([name]) =>
-        name.toUpperCase() !== "OPENAI_API_KEY" &&
-        name.toUpperCase() !== "CODEX_API_KEY",
     ),
   );
 }

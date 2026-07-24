@@ -575,19 +575,13 @@ describe("plugin runtime preparation", () => {
     const install = await bootstrapPlugin(home, selected, {
       codexCommand: { command: "/codex", prefixArgs: [] },
       environment: {
-        CODEX_API_KEY: "codex-secret",
-        OPENAI_API_KEY: "openai-secret",
-        CoDeX_ApI_KeY: "mixed-secret",
-        openai_api_key: "lowercase-secret",
         SAFE_VALUE: "kept",
       },
       runCodex: async (_command, args, environment) => {
-        expect(environment["CODEX_HOME"]).toBe(home);
-        expect(environment["CODEX_API_KEY"]).toBeUndefined();
-        expect(environment["OPENAI_API_KEY"]).toBeUndefined();
-        expect(environment["CoDeX_ApI_KeY"]).toBeUndefined();
-        expect(environment["openai_api_key"]).toBeUndefined();
-        expect(environment["SAFE_VALUE"]).toBe("kept");
+        expect(environment).toMatchObject({
+          CODEX_HOME: home,
+          SAFE_VALUE: "kept",
+        });
         calls.push([...args]);
         if (args[1] === "marketplace") {
           await writeFile(
