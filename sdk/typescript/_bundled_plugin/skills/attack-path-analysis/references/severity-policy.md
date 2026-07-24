@@ -53,7 +53,7 @@ Examples that usually should not remain `high`/`critical` without very strong pr
 - Generic correctness/reliability bugs
 - Strange edge cases with unclear attacker value
 - Low-impact information leaks
-- Internal-only defects without realistic attacker reachability
+- Internal-only defects without attacker reachability
 - The report shows a bug class in isolation, but not a realistic exploit path.
 - The issue requires the attacker to already have privileged, admin, root, console, shell, or code-execution access.
 - "Could maybe matter if chained with many assumptions" arguments
@@ -105,7 +105,6 @@ Final policy-adjustment guidance:
   - `localhost` usually supports low likelihood unless a lower-privileged attacker can realistically reach that listener
   - `none` does not increase likelihood based on exposure
 - Then decide reportability using the existing facts:
-  - if the component is not part of a real product surface or meaningful production workflow, set `ignore`
   - if repository evidence does not establish a realistic lower-privileged in-scope attacker path, set `ignore`
   - if the path is internal-only, developer-only, operator-only, localhost-only, privileged-local, or otherwise not meaningfully reportable in context, set `ignore`
 

@@ -20,7 +20,7 @@ Use the shared scan artifact path conventions in `../../references/scan-artifact
 
 1. Load the per-scan threat model path from `../../references/scan-artifacts.md` as the repo-specific threat-model source of truth. Start from this along with the potential findings. Both inputs are required for this workflow.
    - For repository-wide and scoped-path scans, include validation closure rows marked `reportable` or `survives: yes` even if they were not assigned polished candidate numbers during discovery.
-2. Determine whether the affected code is in scope for the repository threat model and whether it belongs to a real product surface or real production workflow.
+2. Determine whether the affected code is in scope for the repository threat model and whether it belongs to a product surface or production workflow.
 3. Build a factual attack path using repository evidence only:
    - service mapping
    - exposure and entry points
@@ -40,7 +40,7 @@ Use the shared scan artifact path conventions in `../../references/scan-artifact
 Use this checklist before finalizing the attack-path facts or policy decision:
 
 - Determine whether the finding is actually a real security vulnerability rather than a correctness bug or false positive.
-- Determine whether the affected code belongs to a real product surface or meaningful production workflow.
+- Determine whether the affected code belongs to a product surface or production workflow.
 - Map the relevant service, component, or workflow context from repository evidence.
 - Establish exposure and entry points from repository evidence such as listeners, ingress, load balancers, service ports, manifests, routing, or network policy.
 - Establish identities, privileges, and trust boundaries that matter for the path.
@@ -103,5 +103,5 @@ Render attack-path facts using `references/attack-path-facts.md`.
 - Save a final visible report for each candidate finding using that finding's attack-path analysis report path from `../../references/scan-artifacts.md`.
 
 -- Considerations for attack path --
-- A finding should count as a real security issue if a realistic attacker could use it from a reasonable attack surface relevant to the product, especially if it is something that is part of the thread model.
-- The attack surface should generally be one that is plausibly exposed to end users / external actors (or another actor explicitly in scope in the threat model), not an arbitrary internal-only or contrived path.
+- A bug matters if evidence shows an attacker could exploit it.
+- The attack surface should generally be one that is plausibly exposed to end users / external actors (or another actor explicitly in scope in the threat model).
