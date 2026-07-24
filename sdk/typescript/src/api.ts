@@ -126,6 +126,17 @@ export interface ScanOptions {
   signal?: AbortSignal;
 }
 
+export type ScanAuthentication =
+  | {
+      method: "api_key";
+      source: "OPENAI_API_KEY" | "CODEX_API_KEY";
+      verified: false;
+    }
+  | {
+      method: "stored_credentials";
+      verified: false;
+    };
+
 type ScanObserverName =
   | "onOutputArchived"
   | "onOutputDirReady"
@@ -1178,6 +1189,15 @@ async function collectResult(
   });
 }
 
+export function scanAuthentication(
+  environment: ProcessEnvironment,
+): ScanAuthentication {
+  const key = environmentApiKeyEntry(environment);
+  return key === null
+    ? { method: "stored_credentials", verified: false }
+    : { method: "api_key", source: key.source, verified: false };
+}
+
 function notifyObserver<Arguments extends unknown[]>(
   observerName: ScanObserverName,
   observer: ((...args: Arguments) => void) | undefined,
@@ -1193,12 +1213,19 @@ function notifyObserver<Arguments extends unknown[]>(
 }
 
 function environmentApiKey(environment: ProcessEnvironment): string | null {
-  for (const requested of ["OPENAI_API_KEY", "CODEX_API_KEY"]) {
+  return environmentApiKeyEntry(environment)?.value ?? null;
+}
+
+function environmentApiKeyEntry(environment: ProcessEnvironment): {
+  source: "OPENAI_API_KEY" | "CODEX_API_KEY";
+  value: string;
+} | null {
+  for (const requested of ["OPENAI_API_KEY", "CODEX_API_KEY"] as const) {
     const canonical = environment[requested]?.trim();
-    if (canonical) return canonical;
+    if (canonical) return { source: requested, value: canonical };
     for (const [name, value] of Object.entries(environment)) {
       if (name.toUpperCase() === requested && value?.trim())
-        return value.trim();
+        return { source: requested, value: value.trim() };
     }
   }
   return null;

@@ -26,7 +26,12 @@ import { pipeline } from "node:stream/promises";
 import { pathToFileURL } from "node:url";
 import { Cli, z } from "incur";
 import { parse as parseToml } from "smol-toml";
-import { CodexSecurity, type ScanOptions, type ScanPreflight } from "./api.js";
+import {
+  CodexSecurity,
+  scanAuthentication,
+  type ScanOptions,
+  type ScanPreflight,
+} from "./api.js";
 import {
   createBulkScanDiscoveryDependencies,
   runBulkScanWizard,
@@ -145,6 +150,7 @@ interface CliDependencies {
   createSecurity(
     config: CodexSecurityConfig,
   ): Pick<CodexSecurity, "run" | "preflight" | "close">;
+  environment: NodeJS.ProcessEnv;
   currentDirectory(): string;
   now(): number;
   setInterval(callback: () => void, milliseconds: number): NodeJS.Timeout;
@@ -164,6 +170,7 @@ interface CliDependencies {
 
 const DEFAULT_DEPENDENCIES: CliDependencies = {
   createSecurity: (config) => new CodexSecurity(config),
+  environment: process.env,
   currentDirectory: cwd,
   now: Date.now,
   setInterval: (callback, milliseconds) => setInterval(callback, milliseconds),
@@ -896,6 +903,21 @@ export async function main(
           "-c",
           'cli_auth_credentials_store="file"',
         ]);
+        if (args.action === "status") {
+          const authentication = scanAuthentication(dependencies.environment);
+          if (
+            authentication.method === "api_key" &&
+            (exitCode === 0 || exitCode === 1)
+          ) {
+            exitCode = 0;
+            errorOutput.write(
+              `Effective scan authentication: API key from ${authentication.source}.\n`,
+            );
+            errorOutput.write(
+              "To use a ChatGPT sign-in, unset OPENAI_API_KEY and CODEX_API_KEY.\n",
+            );
+          }
+        }
       },
     })
     .command("logout", {

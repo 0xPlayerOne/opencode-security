@@ -48,7 +48,10 @@ sign-in. If Codex stores credentials in the system keyring, run
 `npx codex-security login` once before scanning.
 
 An environment API key takes precedence over a stored sign-in. Unset both
-`OPENAI_API_KEY` and `CODEX_API_KEY` to use your ChatGPT sign-in.
+`OPENAI_API_KEY` and `CODEX_API_KEY` to use your ChatGPT sign-in. When an
+environment key is configured, `codex-security login status` identifies the
+effective credential source without printing its value, including when no
+stored sign-in exists.
 
 ## CLI
 

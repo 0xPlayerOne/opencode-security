@@ -297,6 +297,7 @@ function dependencies(
     onWorkbench?: (args: readonly string[]) => JsonObject | Promise<JsonObject>;
     currentDirectory?: string;
     preflight?: ScanPreflight;
+    environment?: NodeJS.ProcessEnv;
     signals?: FakeSignals;
     result?: ScanResult;
     workerStatuses?: import("../src/index.js").ScanWorkerStatus[];
@@ -335,6 +336,7 @@ function dependencies(
       options.onConfig?.(config);
       return security;
     },
+    environment: options.environment ?? {},
     currentDirectory: () => options.currentDirectory ?? "/current/repository",
     now: () => 0,
     setInterval: () => ({}) as NodeJS.Timeout,
@@ -1122,6 +1124,97 @@ describe("CLI", () => {
       expect(stdout.text()).toBe("");
       expect(stderr.text()).toBe("");
     }
+  });
+
+  test("explains when an environment API key overrides the stored login", async () => {
+    for (const [environment, expectedSource] of [
+      [{ OPENAI_API_KEY: "sk-proj-SYNTHETIC_SECRET_123" }, "OPENAI_API_KEY"],
+      [{ Codex_Api_Key: "sk-proj-SYNTHETIC_SECRET_456" }, "CODEX_API_KEY"],
+    ] as const) {
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await main(
+          ["login", "status"],
+          stdout.stream,
+          stderr.stream,
+          dependencies({ environment }),
+        ),
+      ).toBe(0);
+      expect(stderr.text()).toContain(
+        `Effective scan authentication: API key from ${expectedSource}.`,
+      );
+      expect(stderr.text()).toContain(
+        "To use a ChatGPT sign-in, unset OPENAI_API_KEY and CODEX_API_KEY.",
+      );
+      expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
+    }
+  });
+
+  test("keeps stored-login status unchanged when no environment key is set", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    expect(
+      await main(
+        ["login", "status"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({ environment: { OPENAI_API_KEY: "   " } }),
+      ),
+    ).toBe(0);
+    expect(stderr.text()).toBe("");
+  });
+
+  test("reports effective environment credentials without a stored sign-in", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const environment: NodeJS.ProcessEnv = {
+      OPENAI_API_KEY: "synthetic-primary-key",
+      CODEX_API_KEY: "synthetic-secondary-key",
+    };
+    expect(
+      await main(
+        ["login", "status"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({ environment, onCodex: () => 1 }),
+      ),
+    ).toBe(0);
+    expect(stderr.text()).toContain("API key from OPENAI_API_KEY");
+    expect(stderr.text()).not.toContain("synthetic");
+
+    delete environment["OPENAI_API_KEY"];
+    const rotated = capture();
+    expect(
+      await main(
+        ["login", "status"],
+        capture().stream,
+        rotated.stream,
+        dependencies({ environment, onCodex: () => 1 }),
+      ),
+    ).toBe(0);
+    expect(rotated.text()).toContain("API key from CODEX_API_KEY");
+
+    expect(
+      await main(
+        ["login", "status"],
+        capture().stream,
+        capture().stream,
+        dependencies({ environment: {}, onCodex: () => 1 }),
+      ),
+    ).toBe(1);
+
+    expect(
+      await main(
+        ["login", "status"],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          environment: { OPENAI_API_KEY: "synthetic-key" },
+          onCodex: () => 17,
+        }),
+      ),
+    ).toBe(17);
   });
 
   test("keeps delegated credentials in the configured Codex home", async () => {

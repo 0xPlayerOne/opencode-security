@@ -1,6 +1,7 @@
 export { CodexSecurity } from "./api.js";
 export type {
   CodexSecurityMetadata,
+  ScanAuthentication,
   ScanOptions,
   ScanPreflight,
 } from "./api.js";
