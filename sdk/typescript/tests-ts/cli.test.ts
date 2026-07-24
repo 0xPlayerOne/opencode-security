@@ -12,7 +12,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { describe, expect, test } from "bun:test";
@@ -603,19 +603,21 @@ describe("CLI", () => {
   }, 30_000);
 
   test("lists repository and scan-root history without starting Codex", async () => {
+    const repository = resolve("/current/repository");
+    const scanRoot = resolve("/tmp/history");
     const cases: Array<[string[], string[]]> = [
-      [["scans"], ["list-scans", "--repository", "/current/repository"]],
+      [["scans"], ["list-scans", "--repository", repository]],
       [
         ["scans", "list"],
-        ["list-scans", "--repository", "/current/repository"],
+        ["list-scans", "--repository", repository],
       ],
       [
         ["scans", "list", "other"],
-        ["list-scans", "--repository", "/current/repository/other"],
+        ["list-scans", "--repository", resolve(repository, "other")],
       ],
       [
         ["scans", "list", "--scan-root", "/tmp/history"],
-        ["list-scans", "--scan-root", "/tmp/history"],
+        ["list-scans", "--scan-root", scanRoot],
       ],
     ];
     for (const [argv, expected] of cases) {
