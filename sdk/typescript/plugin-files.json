@@ -60,6 +60,8 @@
     "skills/attack-path-analysis/agents/openai.yaml",
     "skills/attack-path-analysis/references/attack-path-facts.md",
     "skills/attack-path-analysis/references/severity-policy.md",
+    "skills/define-security-policy/SKILL.md",
+    "skills/define-security-policy/agents/openai.yaml",
     "skills/deep-security-scan/SKILL.md",
     "skills/deep-security-scan/agents/openai.yaml",
     "skills/finding-discovery/SKILL.md",
