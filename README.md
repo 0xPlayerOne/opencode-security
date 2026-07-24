@@ -135,6 +135,136 @@ and attack-path phases. Completion shows finding severity, coverage, elapsed
 time, available token and worker counts, the results directory, and the next
 useful command. Progress remains on stderr; JSON results remain on stdout.
 
+## Run bulk scans in Docker
+
+The customer container runs noninteractive bulk scans from a supplied CSV on a
+Linux Docker host. It does not support interactive repository discovery. The
+included `compose.yaml` configures the image, persistent files, and hardened
+Codex command sandbox.
+
+Create a `repositories.csv` with one full, immutable Git commit per repository:
+
+```csv
+id,repository,revision
+payments,https://github.com/example/payments.git,0123456789abcdef0123456789abcdef01234567
+```
+
+Create private, persistent result and authentication directories, and let the
+container write files as your current user:
+
+```bash
+mkdir -p results state
+chmod 700 results state
+export CODEX_SECURITY_USER="$(id -u):$(id -g)"
+docker compose build codex-security
+```
+
+For a one-time sign-in from a remote or headless Docker host, run:
+
+```bash
+docker compose run --rm codex-security login --device-auth
+```
+
+Open the displayed verification URL in your own browser and enter the one-time
+code. The login remains in `state/` after the container exits. For unattended
+enterprise deployments, store an enterprise access token in the same directory
+without exposing the token in command arguments:
+
+```bash
+printenv CODEX_ACCESS_TOKEN | \
+  docker compose run --rm -T codex-security login --with-access-token
+```
+
+Alternatively, provide `OPENAI_API_KEY` or `CODEX_API_KEY` through your host
+environment or secret manager. For private repositories, provide `GH_TOKEN` or
+`GITHUB_TOKEN` the same way. Compose passes only the named, configured
+credentials to the container.
+
+Security scans remain subject to the model's cybersecurity access policies.
+Depending on the account and repository contents, full-repository scans may
+require enrollment in [Trusted Access for Cyber](https://chatgpt.com/cyber).
+A valid Codex login and GitHub token do not grant that authorization. If access
+is denied, the scan records the repository as failed and exits unsuccessfully.
+
+Start a resumable, four-worker scan with the default command:
+
+```bash
+docker compose run --rm codex-security
+```
+
+Full-repository scans can take tens of minutes per repository at the default
+extra-high reasoning setting. Run large campaigns as asynchronous batch jobs
+and keep the results and authentication directories mounted throughout the run.
+
+Completed reports, per-repository findings, and the scan manifest appear in
+`results/` on the host. The workbench state for that campaign remains in
+`results/.codex-security-state/`; the reusable Codex login remains separately in
+`state/`. This allows a new results directory to start a separate campaign with
+the same login without colliding with an earlier scan. Rerun the same command
+with the original CSV and the same `results/` and `state/` directories to resume
+an interrupted scan.
+
+To choose a different number of parallel workers or retry failed repositories,
+override the default scan command:
+
+```bash
+docker compose run --rm codex-security \
+  bulk-scan /input/repositories.csv \
+  --output-dir /output \
+  --workers 8 \
+  --max-attempts 2
+```
+
+Set `CODEX_SECURITY_CSV`, `CODEX_SECURITY_RESULTS`, or `CODEX_SECURITY_STATE`
+to use existing files or directories outside the Compose project. Set
+`CODEX_SECURITY_IMAGE` to use an approved, already-built image. Set
+`CODEX_SECURITY_GIT_HOST` when accessing GitHub Enterprise Server. Keep
+credentials, repository lists, and results out of the image and Git; the
+included ignore files exclude them from image builds and commits.
+All CSV files, including custom-named repository inventories, are excluded from
+the Docker build context. Compose mounts the selected CSV at runtime instead.
+
+The included Compose configuration drops all Linux capabilities, prevents new
+privileges, runs as a nonroot user, and applies the supplied default-deny
+seccomp profile. Codex Security runs each scan command in a separate
+unprivileged Linux sandbox. Docker's default seccomp profile blocks the user and
+mount namespaces required by that sandbox; the supplied profile permits only
+the needed namespace operations. The Linux host must allow unprivileged user
+namespaces. Some Docker Desktop virtual machines additionally restrict nested
+mount namespaces, so use a Linux host for production scans.
+
+For environments without Docker Compose, the equivalent lower-level invocation
+is:
+
+```bash
+docker run --rm --init \
+  --user "$(id -u):$(id -g)" \
+  --cap-drop ALL \
+  --security-opt no-new-privileges \
+  --security-opt "seccomp=$PWD/docker/codex-security-seccomp.json" \
+  --env OPENAI_API_KEY \
+  --env CODEX_API_KEY \
+  --env GH_TOKEN \
+  --env GITHUB_TOKEN \
+  --env CODEX_SECURITY_GIT_HOST \
+  --mount "type=bind,source=$PWD/repositories.csv,target=/input/repositories.csv,readonly" \
+  --mount "type=bind,source=$PWD/results,target=/output" \
+  --mount "type=bind,source=$PWD/state,target=/state" \
+  codex-security:local \
+  bulk-scan /input/repositories.csv \
+  --output-dir /output
+```
+
+The image configures a noninteractive Git credential helper for `github.com`
+when a GitHub token is supplied. The token works with both HTTPS repository
+URLs and `git@github.com:` repository URLs without mounting an SSH agent. The
+image never places that token in a repository URL, writes it to image layers,
+or sends it to another Git host. Set `CODEX_SECURITY_GIT_HOST` to the hostname
+of a GitHub Enterprise Server instance when needed.
+
+Use `--workers` to control concurrent repository scans and `--max-attempts` to
+retry failures. The command returns a nonzero status when any repository fails.
+
 ## Scan history and reruns
 
 `npx codex-security scans list` lists scans for the current repository. Pass a
