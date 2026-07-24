@@ -42,6 +42,7 @@ import workbench_scan_history as scan_history
 from filesystem_identity import serialize_filesystem_identity as serialize_filesystem_identity
 from filesystem_identity import stored_filesystem_identity_matches
 from finalize_scan_contract import (
+    PRODUCER_NAME,
     ContractError,
     _prepare_scan_finalization,
     _write_prepared_scan_finalization,
@@ -621,6 +622,12 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
 
     contract = scan_contract(scan)
     target_contract = contract["target"]
+    plugin_manifest = read_json_object(
+        Path(__file__).resolve().parent.parent / ".codex-plugin" / "plugin.json"
+    )
+    plugin_version = plugin_manifest.get("version")
+    if not isinstance(plugin_version, str) or not plugin_version:
+        raise SystemExit("plugin.json: expected a nonempty Codex Security plugin version.")
     target: dict[str, Any] = {
         "targetId": target_contract["targetId"],
         "displayName": target_contract["displayName"],
@@ -633,8 +640,8 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
     else:
         if scan["target_revision"] != "unversioned":
             target["revision"] = scan["target_revision"]
-        if scan["target_snapshot_digest"]:
-            target["snapshotDigest"] = scan["target_snapshot_digest"]
+        if "requiredSnapshotDigest" in target_contract:
+            target["snapshotDigest"] = target_contract["requiredSnapshotDigest"]
 
     scope: dict[str, Any] = {
         "includePaths": requested_scan_paths(scan),
@@ -645,6 +652,7 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
         "scanId": scan["id"],
         "startedAt": scan["started_at"],
         "completedAt": completed_at,
+        "producer": {"name": PRODUCER_NAME, "version": plugin_version},
         "target": target,
         "allowedTargetKinds": target_contract["allowedKinds"],
         "scope": scope,
