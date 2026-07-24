@@ -606,7 +606,6 @@ describe("CLI", () => {
 
   test("lists repository and scan-root history without starting Codex", async () => {
     const repository = resolve("/current/repository");
-    const scanRoot = resolve("/tmp/history");
     const cases: Array<[string[], string[]]> = [
       [["scans"], ["list-scans", "--repository", repository]],
       [
@@ -619,7 +618,7 @@ describe("CLI", () => {
       ],
       [
         ["scans", "list", "--scan-root", "/tmp/history"],
-        ["list-scans", "--scan-root", scanRoot],
+        ["list-scans", "--scan-root", resolve("/tmp/history")],
       ],
     ];
     for (const [argv, expected] of cases) {
