@@ -107,6 +107,10 @@ incomplete coverage and runtime errors still exit nonzero:
 npx codex-security scan . --diff origin/main --json --fail-on-severity high > codex-security.json
 ```
 
+JSON scans remain noninteractive, including when stderr is a terminal. Commands
+that run Codex interactively (`validate`, `patch`, `login`, and `logout`) reject
+`--json`. Write CSV exports to a file when JSON output is selected.
+
 Scans use `gpt-5.6-sol` with extra-high reasoning effort by default. To override
 either setting, pass valid TOML values (including quotes for strings):
 

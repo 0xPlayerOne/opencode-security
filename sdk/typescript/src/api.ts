@@ -662,14 +662,18 @@ export class CodexSecurity {
   }
 
   async #finishClose(): Promise<void> {
-    this.#abortController.abort();
+    const activeOperation = this.#activeOperation;
     const loginHandles = [...this.#loginHandles];
+    if (
+      activeOperation !== null ||
+      loginHandles.length > 0 ||
+      (this.#runtime === null && this.#runtimePromise !== null)
+    ) {
+      this.#abortController.abort();
+    }
     for (const handle of loginHandles) handle.cancel();
     await Promise.allSettled(
-      [
-        this.#activeOperation,
-        ...loginHandles.map((handle) => handle.wait()),
-      ].filter(
+      [activeOperation, ...loginHandles.map((handle) => handle.wait())].filter(
         (operation): operation is Promise<unknown> => operation !== null,
       ),
     );

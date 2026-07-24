@@ -15,8 +15,8 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import type { CodexOptions, ThreadEvent } from "@openai/codex-sdk";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { Codex, type CodexOptions, type ThreadEvent } from "@openai/codex-sdk";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import {
   AuthenticationRequiredError,
@@ -2673,6 +2673,103 @@ appendFileSync(${JSON.stringify(keyLog)}, apiKey.trim() + "\\n");
     await expect(turn).rejects.toThrow("CodexSecurity is closed");
     await closing;
     expect(createCodexCalled).toBe(false);
+  });
+
+  test("does not abort a settled scan signal during idle client cleanup", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    let scanSignal: AbortSignal | undefined;
+
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed(
+              _input: string,
+              options: { signal: AbortSignal },
+            ) {
+              scanSignal = options.signal;
+              async function* failedEvents(): AsyncGenerator<ThreadEvent> {
+                yield { type: "thread.started", thread_id: "thread-1" };
+                yield {
+                  type: "turn.failed",
+                  error: { message: "upstream authentication failed" },
+                };
+              }
+              return { events: failedEvents() };
+            },
+          }),
+        }),
+      },
+    );
+
+    await expect(client.run(repository)).rejects.toThrow(
+      "upstream authentication failed",
+    );
+    expect(scanSignal?.aborted).toBe(false);
+    await client.close();
+    expect(scanSignal?.aborted).toBe(false);
+  });
+
+  test("closes a real Codex subprocess cleanly after a streamed terminal failure", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    const preload = join(root, "fake-codex.mjs");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    await writeFile(
+      preload,
+      [
+        'process.stdout.write(`${JSON.stringify({type:"thread.started",thread_id:"thread-1"})}\\n`);',
+        'process.stdout.write(`${JSON.stringify({type:"turn.failed",error:{message:"401 invalid API key"}})}\\n`);',
+        "setInterval(() => {}, 1_000);",
+        "await new Promise(() => {});",
+      ].join("\n"),
+    );
+    const nodeExecutable = execFileSync("node", ["-p", "process.execPath"], {
+      encoding: "utf8",
+    }).trim();
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => ({
+          ...preparedRuntime(codexHome),
+          environment: { CODEX_HOME: codexHome },
+        }),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: (options: CodexOptions) =>
+          new Codex({
+            ...options,
+            codexPathOverride: nodeExecutable,
+            env: {
+              ...options.env,
+              NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+            },
+          }),
+      },
+    );
+
+    await expect(client.run(repository)).rejects.toThrow("401 invalid API key");
+    await expect(client.close()).resolves.toBeUndefined();
+    await expect(client.close()).resolves.toBeUndefined();
   });
 
   test("cleans the bootstrap workspace when credential-home cleanup fails", async () => {

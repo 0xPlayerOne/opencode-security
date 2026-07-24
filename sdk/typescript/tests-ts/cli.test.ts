@@ -907,6 +907,96 @@ describe("CLI", () => {
     expect(timers).toBe(0);
   });
 
+  test("keeps structured scans noninteractive even when stderr is a terminal", async () => {
+    for (const options of [
+      ["--json"],
+      ["--format", "json"],
+      ["--format", "jsonl"],
+    ]) {
+      const stdout = capture();
+      const stderr = capture(true);
+      let timers = 0;
+      const deps = dependencies();
+      deps.setInterval = () => {
+        timers += 1;
+        return {} as NodeJS.Timeout;
+      };
+
+      expect(
+        await main(
+          ["scan", ".", ...options],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+      expect(stderr.text()).toContain("Preparing scan");
+      expect(stderr.text()).toContain("Running scan");
+      expect(stderr.text()).not.toContain("\u001B");
+      expect(stderr.text()).not.toContain("\r");
+      expect(timers).toBe(0);
+    }
+  });
+
+  test("rejects structured modes before starting interactive Codex commands", async () => {
+    for (const [command, arguments_] of [
+      ["validate", ["finding", "--json"]],
+      ["patch", ["issue", "--format", "json"]],
+      ["login", ["--json"]],
+      ["login", ["status", "--format", "jsonl"]],
+      ["logout", ["--json"]],
+    ] as const) {
+      let invoked = false;
+      const stdout = capture();
+      const stderr = capture(true);
+
+      expect(
+        await main(
+          [command, ...arguments_],
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            onCodex: () => {
+              invoked = true;
+              return 0;
+            },
+          }),
+        ),
+      ).toBe(2);
+      expect(invoked).toBe(false);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain(
+        `${command} does not support noninteractive JSON output`,
+      );
+    }
+  });
+
+  test("rejects CSV stdout when JSON output is requested", async () => {
+    let exported = false;
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.exportFindings = async () => {
+      exported = true;
+      return new Uint8Array();
+    };
+
+    expect(
+      await main(
+        ["export", "scan", "--export-format", "csv", "--output", "-", "--json"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    expect(exported).toBe(false);
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain(
+      "CSV stdout cannot be combined with JSON output",
+    );
+  });
+
   test("prints export help without initializing Codex", async () => {
     const stdout = capture();
     const stderr = capture();

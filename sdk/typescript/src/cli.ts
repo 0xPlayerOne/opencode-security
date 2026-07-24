@@ -642,6 +642,7 @@ export async function main(
           },
           errorOutput,
           dependencies,
+          format !== "json" && format !== "jsonl",
         );
         exitCode = outcome.exitCode;
         if (outcome.error !== undefined) {
@@ -1094,7 +1095,40 @@ function validateCliArguments(
     ].includes(value),
   );
   if (commandIndex < 0) return undefined;
-  const command = argv[commandIndex];
+  const command = argv[commandIndex]!;
+  const structuredOutput = argv.some(
+    (value, index) =>
+      value === "--json" ||
+      ((value === "--format" ||
+        value === "--format=json" ||
+        value === "--format=jsonl") &&
+        (value.endsWith("=json") ||
+          value.endsWith("=jsonl") ||
+          argv[index + 1] === "json" ||
+          argv[index + 1] === "jsonl")),
+  );
+  if (
+    structuredOutput &&
+    ["validate", "patch", "login", "logout"].includes(command)
+  ) {
+    return `${command} does not support noninteractive JSON output; run it without --json or --format json.`;
+  }
+  if (
+    command === "export" &&
+    structuredOutput &&
+    argv.some(
+      (value, index) =>
+        value === "--output=-" ||
+        (value === "--output" && argv[index + 1] === "-"),
+    ) &&
+    argv.some(
+      (value, index) =>
+        value === "--export-format=csv" ||
+        (value === "--export-format" && argv[index + 1] === "csv"),
+    )
+  ) {
+    return "CSV stdout cannot be combined with JSON output; write CSV to a file or omit --json.";
+  }
   if (command === "scan" && !argv.includes("--schema")) {
     if (
       argv.some(
@@ -1304,6 +1338,7 @@ async function runScan(
   arguments_: ScanArguments,
   errorOutput: Writable,
   dependencies: CliDependencies,
+  interactive = true,
 ): Promise<ScanOutcome> {
   let scanDir: string | null = null;
   let requestedSignal: SignalName | null = null;
@@ -1322,7 +1357,7 @@ async function runScan(
       }
       requestedSignal = signal;
       progress?.stopTimer();
-      if (errorOutput.isTTY === true) {
+      if (progress?.interactive === true) {
         try {
           dependencies.writeSynchronously(errorOutput, SHOW_CURSOR);
         } catch {
@@ -1361,7 +1396,7 @@ async function runScan(
       codexOverrides:
         arguments_.codexOverrides ?? parseCodexOverrides(arguments_.codex),
     };
-    progress = new Progress(errorOutput, dependencies);
+    progress = new Progress(errorOutput, dependencies, interactive);
     progress.startTimer(
       arguments_.dryRun ? "Validating scan inputs" : "Preparing scan",
     );
@@ -1657,6 +1692,7 @@ export class Progress {
     "now" | "setInterval" | "clearInterval"
   >;
   readonly #startedAt: number;
+  readonly #interactive: boolean;
   #timer: NodeJS.Timeout | null = null;
   #timerLineActive = false;
   #cursorHidden = false;
@@ -1667,10 +1703,16 @@ export class Progress {
       CliDependencies,
       "now" | "setInterval" | "clearInterval"
     > = DEFAULT_DEPENDENCIES,
+    interactive = true,
   ) {
     this.#stream = stream;
     this.#dependencies = dependencies;
     this.#startedAt = dependencies.now();
+    this.#interactive = interactive;
+  }
+
+  public get interactive(): boolean {
+    return this.#interactive && this.#stream.isTTY === true;
   }
 
   public stage(message: string): void {
@@ -1678,7 +1720,7 @@ export class Progress {
   }
 
   public startTimer(message: string): void {
-    if (this.#stream.isTTY !== true) {
+    if (!this.interactive) {
       this.stage(message);
       return;
     }

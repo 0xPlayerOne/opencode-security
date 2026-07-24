@@ -161,6 +161,11 @@ incomplete coverage and runtime errors still exit nonzero:
 npx codex-security scan . --diff origin/main --json --fail-on-severity high > codex-security.json
 ```
 
+JSON scans never use interactive terminal controls, even when stderr is a TTY.
+The `validate`, `patch`, `login`, and `logout` commands run Codex interactively
+and reject `--json` rather than mixing its terminal output with machine data.
+CSV exports cannot be written to stdout while JSON output is requested.
+
 Use `export` to create CSV, JSON, or SARIF from a completed, sealed scan without
 starting Codex or loading credentials. JSON preserves the sealed findings
 document. CSV uses the portable findings columns, marks findings as open, and
