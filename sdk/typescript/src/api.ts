@@ -122,7 +122,11 @@ export interface ScanOptions {
   onOutputDirReady?: (scanDir: string) => void;
   onAuthentication?: (authentication: ScanAuthentication) => void;
   onScanStarted?: () => void;
-  onReconnect?: (attempt: number, maxAttempts: number) => void;
+  onReconnect?: (
+    attempt: number,
+    maxAttempts: number,
+    details?: ScanReconnectDetails,
+  ) => void;
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
   signal?: AbortSignal;
@@ -138,6 +142,11 @@ export type ScanAuthentication =
       method: "stored_credentials";
       verified: false;
     };
+
+export interface ScanReconnectDetails {
+  reason: "rate_limit" | "network" | "authentication" | "authorization";
+  retryAfterSeconds?: number;
+}
 
 type ScanObserverName =
   | "onAuthentication"
@@ -948,7 +957,11 @@ interface ScanEventRunOptions {
   expectation: ScanExpectation;
   onFinalize?: () => Promise<void>;
   onScanStarted?: () => void;
-  onReconnect?: (attempt: number, maxAttempts: number) => void;
+  onReconnect?: (
+    attempt: number,
+    maxAttempts: number,
+    details?: ScanReconnectDetails,
+  ) => void;
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
 }
@@ -1013,6 +1026,7 @@ export async function runScanEvents(
           options.onReconnect,
           options.onObserverError,
           ...reconnect,
+          reconnectDetails(message),
         );
       }
     }
@@ -1270,6 +1284,71 @@ function reconnectAttempt(message: string): [number, number] | null {
   const attempt = Number(match[1]);
   const maxAttempts = Number(match[2]);
   return attempt <= maxAttempts ? [attempt, maxAttempts] : null;
+}
+
+function reconnectDetails(message: string): ScanReconnectDetails | undefined {
+  const classification = classifyConnectionFailure(message);
+  if (classification !== "rate_limited") {
+    if (classification === "network_error") return { reason: "network" };
+    if (classification === "unauthorized") return { reason: "authentication" };
+    if (classification === "forbidden") return { reason: "authorization" };
+    return undefined;
+  }
+  const delay =
+    /\b(?:try again|retry)\s+in\s+(\d{1,6}(?:\.\d{1,3})?)\s*(?:s\b|seconds?\b)/iu.exec(
+      message,
+    );
+  const retryAfterSeconds = delay === null ? NaN : Number(delay[1]);
+  return {
+    reason: "rate_limit",
+    ...(Number.isFinite(retryAfterSeconds) &&
+    retryAfterSeconds > 0 &&
+    retryAfterSeconds <= 3_600
+      ? { retryAfterSeconds }
+      : {}),
+  };
+}
+
+export function classifyConnectionFailure(
+  error: unknown,
+):
+  | "rate_limited"
+  | "unauthorized"
+  | "forbidden"
+  | "network_error"
+  | "timeout"
+  | "unknown" {
+  const message = error instanceof Error ? error.message : String(error);
+  if (
+    /\brate[_ -]?limit(?:ed|[_ -]exceeded)?\b|\b429\b|\btoo many requests\b/iu.test(
+      message,
+    )
+  ) {
+    return "rate_limited";
+  }
+  if (
+    /\b401\b|\bunauthori[sz]ed\b|\binvalid[_ -](?:api[_ -]?key|authentication|token|credentials?)\b|\b(?:expired|revoked)[_ -](?:api[_ -]?key|token|credentials?)\b|\b(?:api[_ -]?key|token|credentials?)(?: has)? (?:expired|been revoked)\b/iu.test(
+      message,
+    )
+  ) {
+    return "unauthorized";
+  }
+  if (
+    /\b403\b|\bforbidden\b|\bpermission denied\b|\b(?:model|organization|project) access\b|\b(?:access denied|do not have access|not authorized|insufficient permissions)\b|\bmodel[_ -]?not[_ -]?found\b/iu.test(
+      message,
+    )
+  ) {
+    return "forbidden";
+  }
+  if (
+    /\b(?:ENOTFOUND|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|ETIMEDOUT)\b|\b(?:network|connection|TLS|DNS)\b|\berror sending request\b/iu.test(
+      message,
+    )
+  ) {
+    return "network_error";
+  }
+  if (/\b(?:timed? out|timeout)\b/iu.test(message)) return "timeout";
+  return "unknown";
 }
 
 export function scanRuntimeCodexConfig(config: JsonObject): JsonObject {

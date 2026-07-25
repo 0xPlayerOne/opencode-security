@@ -31,6 +31,7 @@ import {
   type ScanAuthentication,
   type ScanOptions,
   ScanInterruptedError,
+  type ScanReconnectDetails,
   type ScanWorkerStatus,
 } from "../src/index.js";
 import {
@@ -121,7 +122,11 @@ function runEvents(
   scanDir: string,
   events: AsyncGenerator<ThreadEvent>,
   abortController = new AbortController(),
-  onReconnect?: (attempt: number, maxAttempts: number) => void,
+  onReconnect?: (
+    attempt: number,
+    maxAttempts: number,
+    details?: ScanReconnectDetails,
+  ) => void,
   onWorkerStatus?: (status: ScanWorkerStatus) => void,
   onScanStarted?: () => void,
   onObserverError?: (observer: ScanObserverName, error: unknown) => void,
@@ -453,6 +458,91 @@ describe("one-shot scan events", () => {
       name: CodexSecurityError.name,
       message: "retry budget exhausted",
     });
+  });
+
+  test("extracts bounded rate-limit context from reconnect notifications", async () => {
+    const scanDir = await copyCompletedScan(await temporaryDirectory());
+    const reconnects: Array<{
+      attempt: number;
+      maxAttempts: number;
+      details?: ScanReconnectDetails;
+    }> = [];
+
+    async function* events(): AsyncGenerator<ThreadEvent> {
+      yield {
+        type: "error",
+        message:
+          "Reconnecting... 2/5 (Rate limit reached for org-private. Please try again in 1.2s.)",
+      };
+      yield {
+        type: "error",
+        message:
+          "Reconnecting... 3/5 (Rate limit reached. Please try again in 999999s.)",
+      };
+      yield { type: "error", message: "Reconnecting... 4/5" };
+      yield* completedEvents();
+    }
+
+    await runEvents(
+      scanDir,
+      events(),
+      new AbortController(),
+      (attempt, maxAttempts, details) => {
+        reconnects.push({
+          attempt,
+          maxAttempts,
+          ...(details ? { details } : {}),
+        });
+      },
+    );
+
+    expect(reconnects).toEqual([
+      {
+        attempt: 2,
+        maxAttempts: 5,
+        details: { reason: "rate_limit", retryAfterSeconds: 1.2 },
+      },
+      { attempt: 3, maxAttempts: 5, details: { reason: "rate_limit" } },
+      { attempt: 4, maxAttempts: 5 },
+    ]);
+    expect(JSON.stringify(reconnects)).not.toContain("org-private");
+  });
+
+  test("classifies reconnect causes without exposing provider details", async () => {
+    const scanDir = await copyCompletedScan(await temporaryDirectory());
+    const reconnects: ScanReconnectDetails[] = [];
+
+    async function* events(): AsyncGenerator<ThreadEvent> {
+      yield {
+        type: "error",
+        message: "Reconnecting... 1/5 (ECONNRESET org-private)",
+      };
+      yield {
+        type: "error",
+        message: "Reconnecting... 2/5 (401 invalid API key org-private)",
+      };
+      yield {
+        type: "error",
+        message: "Reconnecting... 3/5 (403 model access denied org-private)",
+      };
+      yield* completedEvents();
+    }
+
+    await runEvents(
+      scanDir,
+      events(),
+      new AbortController(),
+      (_a, _m, detail) => {
+        if (detail !== undefined) reconnects.push(detail);
+      },
+    );
+
+    expect(reconnects).toEqual([
+      { reason: "network" },
+      { reason: "authentication" },
+      { reason: "authorization" },
+    ]);
+    expect(JSON.stringify(reconnects)).not.toContain("org-private");
   });
 
   test("uses the last reconnect error when Codex ends without a terminal event", async () => {

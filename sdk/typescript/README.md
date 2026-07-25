@@ -272,7 +272,8 @@ model access remain unverified until a real scan starts.
 Scan progress identifies the selected credential source before Codex starts.
 Interactive terminals also show how to retry with ChatGPT when an environment
 API key overrides the stored sign-in. Progress remains on stderr so JSON output
-stays machine readable.
+stays machine readable. Recoverable failures include safe retry causes and,
+when available, the server-provided retry delay.
 
 ## Documentation and security
 
