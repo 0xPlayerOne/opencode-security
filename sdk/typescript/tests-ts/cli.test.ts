@@ -177,6 +177,7 @@ function fakePreflight(repository = "/current/repository"): ScanPreflight {
     target: { kind: "repository", paths: [] },
     mode: "standard",
     outputDir: null,
+    authentication: { method: "stored_credentials", verified: false },
     model: "gpt-5.6-sol",
     reasoningEffort: "xhigh",
   };
@@ -1138,6 +1139,110 @@ describe("CLI", () => {
         );
         expect(help.text()).toContain("--codex <array>");
       }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("preserves Windows network paths without probing them as finding files", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "codex-security-network-input-"),
+    );
+    try {
+      const localFile = join(directory, "local finding.txt");
+      const localDrivePaths =
+        process.platform === "win32"
+          ? [
+              `\\\\?\\${join(directory, "drive finding.txt")}`,
+              `\\\\?\\${join(directory, "nested")}\\..\\safe drive finding.txt`,
+            ]
+          : [
+              String.raw`\\?\C:\drive finding.txt`,
+              String.raw`\\.\C:\device drive finding.txt`,
+              String.raw`\\?\C:\folder\..\safe drive finding.txt`,
+              String.raw`\\.\C:\folder\.\safe device finding.txt`,
+              String.raw`\\?\Volume{12345678-1234-1234-1234-123456789abc}\folder\..\volume finding.txt`,
+              String.raw`\\?\GLOBALROOT\Device\HarddiskVolume1\folder\..\volume finding.txt`,
+            ];
+      const posixDoubleSlashPaths =
+        process.platform === "win32"
+          ? []
+          : [`/${localFile}`, `//.${localFile}`];
+      const networkPaths = [
+        String.raw`\\server\share\finding.txt`,
+        ...(process.platform === "win32"
+          ? [
+              "//server/share/finding.txt",
+              "//?/globalroot/device/lanmanredirector/server/share/finding.txt",
+              "//?/C:/../UNC/server/share/finding.txt",
+            ]
+          : []),
+        String.raw`\\?\UNC\server\share\finding.txt`,
+        String.raw`\\.\UNC\server\share\finding.txt`,
+        String.raw`\\?\GLOBALROOT\Device\LanmanRedirector\server\share\finding.txt`,
+        String.raw`\\.\GLOBALROOT\Device\Mup\server\share\finding.txt`,
+        String.raw`\\.\server\share\finding.txt`,
+        String.raw`\\?\unc/server\share\finding.txt`,
+        String.raw`\\?\C:\..\GLOBALROOT\Device\LanmanRedirector\server\share\finding.txt`,
+        String.raw`\\.\C:\..\GLOBALROOT\Device\Mup\server\share\finding.txt`,
+        String.raw`\\?\C:\.\..\GLOBALROOT\Device\LanmanRedirector\server\share\finding.txt`,
+        String.raw`\\?\Volume{12345678-1234-1234-1234-123456789abc}\..\GLOBALROOT\Device\LanmanRedirector\server\share\finding.txt`,
+        String.raw`\\?\GLOBALROOT\Device\HarddiskVolume1\..\LanmanRedirector\server\share\finding.txt`,
+      ];
+      await writeFile(localFile, "local finding contents\n");
+      await mkdir(join(directory, "nested"));
+      await Promise.all(
+        localDrivePaths.map(async (localDrivePath, index) =>
+          writeFile(
+            resolve(directory, localDrivePath),
+            `local drive ${index + 1} contents\n`,
+          ),
+        ),
+      );
+      if (process.platform !== "win32") {
+        for (const networkPath of networkPaths) {
+          if (networkPath.startsWith("\\") && !networkPath.includes("/")) {
+            await writeFile(
+              join(directory, networkPath),
+              "must not read a network-path decoy\n",
+            );
+          }
+        }
+      }
+
+      let invocation: readonly string[] = [];
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await main(
+          [
+            "validate",
+            localFile,
+            ...localDrivePaths,
+            ...posixDoubleSlashPaths,
+            ...networkPaths,
+          ],
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            currentDirectory: directory,
+            onCodex: (args) => {
+              invocation = args;
+              return 0;
+            },
+          }),
+        ),
+      ).toBe(0);
+      expect(JSON.parse(invocation.at(-1)!.split("\n").at(-1)!)).toEqual([
+        "local finding contents\n",
+        ...localDrivePaths.map(
+          (_, index) => `local drive ${index + 1} contents\n`,
+        ),
+        ...posixDoubleSlashPaths.map(() => "local finding contents\n"),
+        ...networkPaths,
+      ]);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toBe("");
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -2304,7 +2409,17 @@ describe("CLI", () => {
       const preload = join(root, "unavailable-cwd.mjs");
       await writeFile(
         preload,
-        'Object.defineProperty(process, "cwd", { value() { throw new Error("working directory is unavailable"); } });\n',
+        [
+          "const originalCwd = process.cwd;",
+          'Object.defineProperty(process, "cwd", {',
+          "  value() {",
+          '    if (/[\\\\/]dist[\\\\/]cli\\.js:/u.test(new Error().stack ?? "")) {',
+          '      throw new Error("working directory is unavailable");',
+          "    }",
+          "    return originalCwd.call(process);",
+          "  },",
+          "});\n",
+        ].join("\n"),
       );
       const failed = spawnSync(
         "node",
@@ -2914,6 +3029,29 @@ describe("CLI", () => {
       ...fakePreflight("repo"),
     });
     expect(stderr.text()).not.toContain("Running scan");
+  });
+
+  test("keeps selected dry-run authentication metadata safe and machine readable", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const authentication = {
+      method: "api_key" as const,
+      source: "CODEX_API_KEY" as const,
+      verified: false as const,
+    };
+    expect(
+      await main(
+        ["scan", "repo", "--dry-run", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          environment: { CODEX_API_KEY: "synthetic-private-key" },
+          preflight: { ...fakePreflight("repo"), authentication },
+        }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toMatchObject({ authentication });
+    expect(`${stdout.text()}${stderr.text()}`).not.toContain("synthetic");
   });
 
   test("renders dry-run output with Incur structured formats", async () => {

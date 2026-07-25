@@ -302,8 +302,10 @@ for a completed policy violation, `2` for invalid input, incomplete coverage, or
 a runtime/export error, `130` for interruption, and `143` for termination.
 
 Use `--dry-run` or `await security.preflight(...)` to validate local scan
-inputs without initializing Codex, loading credentials, or starting a scan. Dry
-runs do not inspect the plugin or probe Python.
+inputs and report the selected credential source without initializing Codex,
+loading credentials, or starting a scan. Dry runs do not inspect the plugin,
+probe Python, or contact the network; their authentication metadata is not
+verified.
 
 ## TypeScript SDK
 

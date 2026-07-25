@@ -213,7 +213,9 @@ a runtime/export error, `130` for interruption, and `143` for termination.
 Use `--dry-run` or `await security.preflight(...)` to validate the repository,
 target, mode, output location, and Codex overrides without initializing the
 runtime or loading credentials. Dry runs do not inspect the plugin or probe its
-Python interpreter.
+Python interpreter. The preflight result includes the selected authentication
+method and, for an environment API key, its variable name. Authentication and
+model access remain unverified until a real scan starts.
 
 ## SDK
 

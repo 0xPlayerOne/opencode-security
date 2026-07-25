@@ -18,6 +18,7 @@ import {
   relative,
   resolve,
   sep,
+  win32,
 } from "node:path";
 import { cwd } from "node:process";
 import { createInterface } from "node:readline";
@@ -77,6 +78,9 @@ const MAX_CODEX_OVERRIDE_VALUE_LENGTH = 64 * 1_024;
 const MAX_CODEX_OVERRIDE_DEPTH = 64;
 const MAX_SKILL_INPUT_BYTES = 1_024 * 1_024;
 const MAX_SKILL_INPUT_COUNT = 64;
+const WINDOWS_NETWORK_PATH = /^[\\/]{2}/u;
+const WINDOWS_LOCAL_DEVICE_ROOT =
+  /^[\\/]{2}[?.][\\/](?:[A-Za-z]:|Volume\{[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\}|GLOBALROOT[\\/]Device[\\/]HarddiskVolume[0-9]+)(?=[\\/]|$)/iu;
 const HIDE_CURSOR = "\u001B[?25l";
 const SHOW_CURSOR = "\u001B[?25h";
 
@@ -1363,6 +1367,20 @@ function validateCliArguments(
   }
 }
 
+function staysWithinWindowsDeviceRoot(input: string, root: string): boolean {
+  let depth = 0;
+  for (const segment of input.slice(root.length).split(/[\\/]+/u)) {
+    if (segment.length === 0 || segment === ".") continue;
+    if (segment === "..") {
+      if (depth === 0) return false;
+      depth -= 1;
+      continue;
+    }
+    depth += 1;
+  }
+  return true;
+}
+
 async function runSkill(
   skill: "validation" | "fix-finding",
   inputs: readonly string[],
@@ -1399,44 +1417,62 @@ async function runSkill(
     if (Buffer.byteLength(input, "utf8") > MAX_SKILL_INPUT_BYTES) {
       throw new CodexSecurityError("Skill input exceeds the 1 MiB limit.");
     }
-    const path = resolve(directory, input);
-    const metadata = await stat(path).catch((error: unknown) => {
-      if (
-        typeof error === "object" &&
-        error !== null &&
-        "code" in error &&
-        (error.code === "ENOENT" ||
-          error.code === "ENOTDIR" ||
-          error.code === "ENAMETOOLONG" ||
-          error.code === "EINVAL")
-      ) {
-        return undefined;
-      }
-      throw new CodexSecurityError(
-        "Could not read the finding or issue input.",
-      );
-    });
     let contentsOrLiteral = input;
-    if (metadata !== undefined) {
-      if (!metadata.isFile()) {
-        throw new CodexSecurityError(
-          "Finding and issue inputs must be files or literal text.",
-        );
-      }
-      if (metadata.size > MAX_SKILL_INPUT_BYTES) {
-        throw new CodexSecurityError("Skill input exceeds the 1 MiB limit.");
-      }
-      try {
-        contentsOrLiteral = await readFile(path, "utf8");
-      } catch {
+    const windowsNamespace =
+      process.platform === "win32" || input.startsWith("\\");
+    const rawDeviceRoot = WINDOWS_LOCAL_DEVICE_ROOT.exec(input)?.[0];
+    const localDeviceRoot = rawDeviceRoot?.replaceAll("/", "\\").toLowerCase();
+    const normalizedDeviceRoot =
+      localDeviceRoot === undefined
+        ? undefined
+        : WINDOWS_LOCAL_DEVICE_ROOT.exec(win32.resolve(input))?.[0]
+            .replaceAll("/", "\\")
+            .toLowerCase();
+    const windowsNetworkPath =
+      windowsNamespace &&
+      WINDOWS_NETWORK_PATH.test(input) &&
+      (rawDeviceRoot === undefined ||
+        !staysWithinWindowsDeviceRoot(input, rawDeviceRoot) ||
+        localDeviceRoot !== normalizedDeviceRoot);
+    if (!windowsNetworkPath) {
+      const path = resolve(directory, input);
+      const metadata = await stat(path).catch((error: unknown) => {
+        if (
+          typeof error === "object" &&
+          error !== null &&
+          "code" in error &&
+          (error.code === "ENOENT" ||
+            error.code === "ENOTDIR" ||
+            error.code === "ENAMETOOLONG" ||
+            error.code === "EINVAL")
+        ) {
+          return undefined;
+        }
         throw new CodexSecurityError(
           "Could not read the finding or issue input.",
         );
-      }
-      if (contentsOrLiteral.trim().length === 0) {
-        throw new CodexSecurityError(
-          "Finding or issue inputs must not be empty.",
-        );
+      });
+      if (metadata !== undefined) {
+        if (!metadata.isFile()) {
+          throw new CodexSecurityError(
+            "Finding and issue inputs must be files or literal text.",
+          );
+        }
+        if (metadata.size > MAX_SKILL_INPUT_BYTES) {
+          throw new CodexSecurityError("Skill input exceeds the 1 MiB limit.");
+        }
+        try {
+          contentsOrLiteral = await readFile(path, "utf8");
+        } catch {
+          throw new CodexSecurityError(
+            "Could not read the finding or issue input.",
+          );
+        }
+        if (contentsOrLiteral.trim().length === 0) {
+          throw new CodexSecurityError(
+            "Finding or issue inputs must not be empty.",
+          );
+        }
       }
     }
     totalBytes += Buffer.byteLength(contentsOrLiteral, "utf8");
