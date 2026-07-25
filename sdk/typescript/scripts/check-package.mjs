@@ -147,6 +147,7 @@ const distFiles = new Set(
     "multiscan",
     "result",
     "runtime",
+    "scan-comparison",
     "targets",
     "trusted-executable",
     "version",

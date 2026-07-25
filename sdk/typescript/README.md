@@ -109,6 +109,8 @@ npx codex-security scans list /path/to/repository
 npx codex-security scans list --scan-root /path/outside/repository/results
 npx codex-security scans show SCAN_ID
 npx codex-security scans rerun SCAN_ID
+npx codex-security scans match PREVIOUS_SCAN_ID CURRENT_SCAN_ID
+npx codex-security scans match --all
 npx codex-security scans compare PREVIOUS_SCAN_ID CURRENT_SCAN_ID
 npx codex-security export /path/outside/repository/results --export-format sarif --output /path/outside/repository/results.sarif
 npx codex-security export /path/outside/repository/results --export-format csv --output /path/outside/repository/findings.csv
@@ -196,10 +198,15 @@ are never stored in the scan configuration.
 `scans rerun SCAN_ID` repeats the original configuration against the current
 checkout so a fixed vulnerability can be checked again.
 
-`scans compare BEFORE_SCAN_ID AFTER_SCAN_ID` reconciles stable vulnerability
-identities across both scans. Findings are reported as new, persisting,
-reopened, resolved, or unknown. Missing findings are not treated as resolved
-when the later scan is incomplete or does not cover their original scope.
+`scans match BEFORE_SCAN_ID AFTER_SCAN_ID` links findings with the same root
+cause; `scans match --all` matches all completed scans of the current repository,
+including other worktrees and clones. Saved matches appear in `scans show` and
+are reused unless `--force` is passed. Scans without sealed artifacts are skipped.
+
+`scans compare BEFORE_SCAN_ID AFTER_SCAN_ID` reads saved matches and reports
+findings as new, persisting, reopened, resolved, or unknown. Missing findings
+are not treated as resolved when the later scan is incomplete or does not cover
+their original scope.
 
 The CLI uses [Incur](https://github.com/wevm/incur) for agent-friendly discovery
 and structured output. Inspect the command manifest with `--llms`, inspect a

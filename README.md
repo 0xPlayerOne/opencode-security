@@ -71,6 +71,8 @@ npx codex-security scans list /path/to/repo
 npx codex-security scans list --scan-root /path/outside/repo/results
 npx codex-security scans show SCAN_ID
 npx codex-security scans rerun SCAN_ID
+npx codex-security scans match PREVIOUS_SCAN_ID CURRENT_SCAN_ID
+npx codex-security scans match --all
 npx codex-security scans compare PREVIOUS_SCAN_ID CURRENT_SCAN_ID
 npx codex-security export /path/outside/repo/results --export-format sarif --output /path/outside/repo/results.sarif
 npx codex-security export /path/outside/repo/results --export-format csv --output /path/outside/repo/findings.csv
@@ -316,9 +318,14 @@ History is saved in the existing Codex Security workbench database under
 choose a different location.
 
 `scans rerun SCAN_ID` repeats the same configuration against the current
-checkout. `scans compare BEFORE_SCAN_ID AFTER_SCAN_ID` identifies new,
-persisting, reopened, and resolved findings; missing findings remain unknown
-when coverage is incomplete or the original location was not reviewed.
+checkout. `scans match BEFORE_SCAN_ID AFTER_SCAN_ID` links findings with the
+same root cause; `scans match --all` includes every available completed scan
+of the current repository, including other worktrees and clones. Use `--force`
+to recompute saved matches.
+
+`scans compare BEFORE_SCAN_ID AFTER_SCAN_ID` reads saved matches and identifies
+new, persisting, reopened, resolved, or unknown findings. Missing findings remain
+unknown when coverage is incomplete or their original location was not reviewed.
 
 Use `export` to create CSV, JSON, or SARIF from a completed, sealed scan without
 starting Codex or loading credentials. JSON preserves the sealed findings
