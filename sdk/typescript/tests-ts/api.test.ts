@@ -1024,6 +1024,48 @@ describe("CodexSecurity orchestration", () => {
     }
   });
 
+  test("isolates authentication observer failures from scan startup", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    const observerErrors: Array<[ScanObserverName, string]> = [];
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        repositoryRevision: async () => null,
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              throw new Error("scan did not start");
+            },
+          }),
+        }),
+      },
+    );
+
+    await expect(
+      client.run(repository, {
+        outputDir: join(root, "scan"),
+        onAuthentication: () => {
+          throw new Error("authentication observer exploded");
+        },
+        onObserverError: (observer, error) => {
+          observerErrors.push([observer, (error as Error).message]);
+        },
+      }),
+    ).rejects.toThrow("scan did not start");
+    expect(observerErrors).toEqual([
+      ["onAuthentication", "authentication observer exploded"],
+    ]);
+    await client.close();
+  });
+
   test("previews an existing output archive without changing files", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -2437,6 +2479,7 @@ if (process.argv.slice(2).join(" ") !== "login --with-api-key") {
 `,
     );
     let codexOptions: CodexOptions | null = null;
+    let selectedAuthentication: unknown;
     let pythonEnvironment: Record<string, string | undefined> | undefined;
     let pythonProtectedRoot: string | undefined;
     const client = new TestClient(
@@ -2493,7 +2536,16 @@ if (process.argv.slice(2).join(" ") !== "login --with-api-key") {
       },
     );
 
-    await client.run(repository);
+    await client.run(repository, {
+      onAuthentication: (authentication) => {
+        selectedAuthentication = authentication;
+      },
+    });
+    expect(selectedAuthentication).toEqual({
+      method: "api_key",
+      source: "OPENAI_API_KEY",
+      verified: false,
+    });
     expect((codexOptions as CodexOptions | null)?.apiKey).toBeUndefined();
     expect(
       (codexOptions as CodexOptions | null)?.codexPathOverride,

@@ -3121,6 +3121,70 @@ describe("CLI", () => {
     expect(stderr.text()).toContain("Running scan");
   });
 
+  test("reports selected scan credentials without contaminating JSON output", async () => {
+    const stdout = capture();
+    const stderr = capture(true);
+    const deps = dependencies();
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        options?.onAuthentication?.({
+          method: "api_key",
+          source: "OPENAI_API_KEY",
+          verified: false,
+        });
+        options?.onScanStarted?.();
+        return fakeResult();
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+    });
+
+    expect(
+      await main(["scan", "--json"], stdout.stream, stderr.stream, deps),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain(
+      "Authentication: API key from OPENAI_API_KEY.",
+    );
+    expect(stderr.text()).toContain(
+      process.platform === "win32"
+        ? "unset OPENAI_API_KEY and CODEX_API_KEY, then retry the scan"
+        : "env -u OPENAI_API_KEY -u CODEX_API_KEY codex-security scan ...",
+    );
+  });
+
+  test("reports stored and secondary-key scan authentication on stderr", async () => {
+    for (const [authentication, expected] of [
+      [
+        { method: "stored_credentials", verified: false },
+        "Authentication: stored Codex credentials.",
+      ],
+      [
+        { method: "api_key", source: "CODEX_API_KEY", verified: false },
+        "Authentication: API key from CODEX_API_KEY.",
+      ],
+    ] as const) {
+      const stdout = capture();
+      const stderr = capture();
+      const deps = dependencies();
+      deps.createSecurity = () => ({
+        run: async (_repository, options) => {
+          options?.onAuthentication?.(authentication);
+          return fakeResult();
+        },
+        preflight: async () => fakePreflight(),
+        close: async () => {},
+      });
+
+      expect(
+        await main(["scan", "--json"], stdout.stream, stderr.stream, deps),
+      ).toBe(0);
+      expect(stderr.text()).toContain(expected);
+      expect(stderr.text()).not.toContain("env -u");
+      expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    }
+  });
+
   test("renders scan output with the Incur default format", async () => {
     const stdout = capture();
     const stderr = capture();

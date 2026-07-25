@@ -1976,6 +1976,24 @@ async function runScan(
       onOutputDirReady: (path) => {
         scanDir = path;
       },
+      onAuthentication: (authentication) => {
+        progress?.stopTimer();
+        if (authentication.method === "api_key") {
+          progress?.stage(
+            `Authentication: API key from ${authentication.source}.`,
+          );
+          if (errorOutput.isTTY === true) {
+            progress?.stage(
+              process.platform === "win32"
+                ? "To use a ChatGPT sign-in, unset OPENAI_API_KEY and CODEX_API_KEY, then retry the scan."
+                : "Retry with ChatGPT: env -u OPENAI_API_KEY -u CODEX_API_KEY codex-security scan ...",
+            );
+          }
+        } else {
+          progress?.stage("Authentication: stored Codex credentials.");
+        }
+        progress?.startTimer("Preparing scan");
+      },
       onScanStarted: () => {
         progress?.stopTimer();
         progress?.startTimer(runningMessage());

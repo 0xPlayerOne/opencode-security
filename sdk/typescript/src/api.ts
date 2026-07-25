@@ -120,6 +120,7 @@ export interface ScanOptions {
   failureSeverity?: SeverityLevel;
   onOutputArchived?: (archiveDir: string) => void;
   onOutputDirReady?: (scanDir: string) => void;
+  onAuthentication?: (authentication: ScanAuthentication) => void;
   onScanStarted?: () => void;
   onReconnect?: (attempt: number, maxAttempts: number) => void;
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
@@ -139,6 +140,7 @@ export type ScanAuthentication =
     };
 
 type ScanObserverName =
+  | "onAuthentication"
   | "onOutputArchived"
   | "onOutputDirReady"
   | "onScanStarted"
@@ -353,6 +355,12 @@ export class CodexSecurity {
             "OPENAI_API_KEY or CODEX_API_KEY for CI.",
         );
       }
+      notifyObserver(
+        "onAuthentication",
+        options.onAuthentication,
+        options.onObserverError,
+        scanAuthentication(this.#dependencies.environment),
+      );
       const python = await (
         this.#dependencies.resolvePluginPython ?? resolvePluginPython
       )({
