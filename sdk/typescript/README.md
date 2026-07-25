@@ -124,8 +124,8 @@ for the complete CLI references.
 
 Sign in with `gh auth login`, then run `npx codex-security bulk-scan` to discover
 GitHub repositories pushed in the last 90 days. Archived
-repositories and forks are excluded. Optionally filter by comma-separated
-repository-name keywords, review the matches, and confirm before scanning.
+repositories and forks are excluded. Search the repository list, select the
+repositories to scan, and confirm before scanning.
 Private checkouts reuse your GitHub CLI sign-in without changing your global Git
 configuration. The selected repositories are saved to
 `<output-dir>/repositories.csv` for review or resumption.
