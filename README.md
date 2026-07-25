@@ -1,33 +1,48 @@
 # Codex Security
 
-Run Codex Security scans from the command line or a TypeScript application.
+Codex Security is an open-source CLI and TypeScript SDK for finding, validating,
+and reviewing security issues in code you own or have permission to assess.
 
-> [!WARNING]
-> Codex Security is in beta. APIs, CLI options, and output formats may change.
+> [!NOTE]
+> This package follows semantic versioning. Its public API may change between
+> minor versions before `1.0.0`.
 
 ## Requirements
 
-The SDK and CLI require Node.js 22 or later. Running a scan or exporting findings
-also requires Python 3.10 or later for the bundled Codex Security plugin;
-Python 3.10 also requires `tomli`. Python is not needed to install the package
-or run `--help` and `--version`.
+The SDK and CLI support macOS, Linux, and Windows and require Node.js 22 or
+later. Scanning and exporting findings also require Python 3.10 or later. If
+you use Python 3.10, install the `tomli` package. Python is not needed to
+install the package or run `--help` and `--version`.
+
+Sign in with your OpenAI account or provide an OpenAI API key before running a
+scan. Scan only repositories you own or have explicit permission to assess.
 
 ## Install and scan
 
 ```bash
-npm install @openai/codex-security@beta
+npm install @openai/codex-security
 npx codex-security login
 npx codex-security scan /path/to/repo
 ```
 
-On a remote or headless machine, use `npx codex-security login --device-auth`.
-For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY`.
+Run `npx codex-security --help` to see all commands and
+`npx codex-security scan --help` for scan options.
 
-To store an API key or enterprise access token, pass it on stdin:
+On a remote or headless machine, use `npx codex-security login --device-auth`.
+For CI and other unattended scans, set `OPENAI_API_KEY` or `CODEX_API_KEY` using
+your shell, CI secret, or secret manager.
+
+On Windows, set an API key in PowerShell with:
+
+```powershell
+$env:OPENAI_API_KEY = "<your-api-key>"
+npx codex-security scan C:\code\repository
+```
+
+To store an API key, pass it on stdin:
 
 ```bash
 printenv OPENAI_API_KEY | npx codex-security login --with-api-key
-printenv CODEX_ACCESS_TOKEN | npx codex-security login --with-access-token
 ```
 
 Use `npx codex-security login status` to check the stored sign-in and
@@ -51,17 +66,17 @@ npx codex-security scan /path/to/repo --output-dir /path/outside/repo/results --
 npx codex-security scan /path/to/repo --dry-run
 npx codex-security scan /path/to/repo --fail-on-severity high
 npx codex-security bulk-scan
-npx codex-security bulk-scan repositories.csv --output-dir ./security-scans
+npx codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans
 npx codex-security scans list /path/to/repo
 npx codex-security scans list --scan-root /path/outside/repo/results
 npx codex-security scans show SCAN_ID
 npx codex-security scans rerun SCAN_ID
 npx codex-security scans compare PREVIOUS_SCAN_ID CURRENT_SCAN_ID
-npx codex-security export /path/outside/repo/results --export-format sarif --output results.sarif
-npx codex-security export /path/outside/repo/results --export-format csv --output findings.csv
-npx codex-security export /path/outside/repo/results --export-format json --output findings.json
-npx codex-security validate findings.json "Possible SQL injection in src/query.ts:42"
-npx codex-security patch findings.json "Missing authorization check in src/routes.ts:18"
+npx codex-security export /path/outside/repo/results --export-format sarif --output /path/outside/repo/results.sarif
+npx codex-security export /path/outside/repo/results --export-format csv --output /path/outside/repo/findings.csv
+npx codex-security export /path/outside/repo/results --export-format json --output /path/outside/repo/findings.json
+npx codex-security validate /path/outside/repo/findings.json "Possible SQL injection in src/query.ts:42"
+npx codex-security patch /path/outside/repo/findings.json "Missing authorization check in src/routes.ts:18"
 ```
 
 Use `npx codex-security --version` for the CLI version and
@@ -71,7 +86,12 @@ the default model and reasoning effort, and the next scan command. Add
 initializing Codex or contacting the network.
 
 The output directory must be outside the scanned directory and any enclosing Git
-worktree. When SARIF is produced, it is written to
+worktree. On macOS and Linux, an existing output directory must be private to
+the current user (`chmod 700`). Scan artifacts can contain source excerpts,
+vulnerability details, and reproduction steps. Keep them out of repositories,
+public issue reports, and shared locations.
+
+When SARIF is produced, it is written to
 `<scan-dir>/exports/results.sarif`. Use `npx codex-security scan --help` for all
 target, output, and runtime options.
 
@@ -98,9 +118,6 @@ Use `info --json` for SDK and bundled-plugin metadata. MCP exposes only this
 read-only metadata command; scans, authentication, exports, validation, and
 patching remain CLI-only because the MCP transport cannot cancel active scans.
 
-On macOS/Linux, an existing output directory must be private to the current
-user (`chmod 700`).
-
 If the output directory already contains results, add `--archive-existing`.
 The CLI moves them to `<output-dir>.previous-<timestamp>-<id>` and starts the
 scan in a new, empty directory at the original path. Add `--dry-run` to see
@@ -112,11 +129,17 @@ Incomplete coverage and CLI/runtime errors exit 2. Incomplete scans still write
 the available human or JSON result to stdout and a coverage warning to stderr,
 including in report-only mode.
 
-For CI, keep machine-readable output on stdout and apply a severity policy;
-incomplete coverage and runtime errors still exit nonzero:
+For CI, save machine-readable output outside the checked-out repository and
+apply a severity policy. Incomplete coverage and runtime errors still exit
+nonzero:
 
 ```bash
-npx codex-security scan . --diff origin/main --json --fail-on-severity high > codex-security.json
+SCAN_ROOT="$(mktemp -d)"
+npx codex-security scan . \
+  --diff origin/main \
+  --output-dir "$SCAN_ROOT/results" \
+  --json \
+  --fail-on-severity high > "$SCAN_ROOT/findings.json"
 ```
 
 JSON scans remain noninteractive, including when stderr is a terminal. Commands
@@ -135,12 +158,39 @@ and attack-path phases. Completion shows finding severity, coverage, elapsed
 time, available token and worker counts, the results directory, and the next
 useful command. Progress remains on stderr; JSON results remain on stdout.
 
+## Use the TypeScript SDK
+
+Create a client, choose a private output directory outside the repository, and
+close the client after the scan:
+
+```ts
+import { CodexSecurity } from "@openai/codex-security";
+
+const security = new CodexSecurity();
+
+try {
+  const result = await security.run("/path/to/repository", {
+    outputDir: "/path/outside/repository/results",
+  });
+
+  console.log(result.reportPath);
+  console.log(result.findings.findings.length);
+} finally {
+  await security.close();
+}
+```
+
+The SDK also supports path and diff targets, preflight, progress callbacks,
+cancellation, security knowledge bases, and typed scan results.
+
 ## Run bulk scans in Docker
 
-The customer container runs noninteractive bulk scans from a supplied CSV on a
-Linux Docker host. It does not support interactive repository discovery. The
-included `compose.yaml` configures the image, persistent files, and hardened
-Codex command sandbox.
+The included Docker image runs noninteractive bulk scans from a supplied CSV on
+a Linux Docker host. The included `compose.yaml` configures the image,
+persistent files, and a hardened Codex command sandbox.
+
+<details>
+<summary>Configure a Docker bulk scan</summary>
 
 Create a `repositories.csv` with one full, immutable Git commit per repository:
 
@@ -165,26 +215,13 @@ For a one-time sign-in from a remote or headless Docker host, run:
 docker compose run --rm codex-security login --device-auth
 ```
 
-Open the displayed verification URL in your own browser and enter the one-time
-code. The login remains in `state/` after the container exits. For unattended
-enterprise deployments, store an enterprise access token in the same directory
-without exposing the token in command arguments:
-
-```bash
-printenv CODEX_ACCESS_TOKEN | \
-  docker compose run --rm -T codex-security login --with-access-token
-```
+Open the displayed verification URL in your browser and enter the one-time
+code. The login remains in `state/` after the container exits.
 
 Alternatively, provide `OPENAI_API_KEY` or `CODEX_API_KEY` through your host
 environment or secret manager. For private repositories, provide `GH_TOKEN` or
 `GITHUB_TOKEN` the same way. Compose passes only the named, configured
 credentials to the container.
-
-Security scans remain subject to the model's cybersecurity access policies.
-Depending on the account and repository contents, full-repository scans may
-require enrollment in [Trusted Access for Cyber](https://chatgpt.com/cyber).
-A valid Codex login and GitHub token do not grant that authorization. If access
-is denied, the scan records the repository as failed and exits unsuccessfully.
 
 Start a resumable, four-worker scan with the default command:
 
@@ -265,6 +302,8 @@ of a GitHub Enterprise Server instance when needed.
 Use `--workers` to control concurrent repository scans and `--max-attempts` to
 retry failures. The command returns a nonzero status when any repository fails.
 
+</details>
+
 ## Scan history and reruns
 
 `npx codex-security scans list` lists scans for the current repository. Pass a
@@ -307,29 +346,15 @@ loading credentials, or starting a scan. Dry runs do not inspect the plugin,
 probe Python, or contact the network; their authentication metadata is not
 verified.
 
-## TypeScript SDK
+## Documentation, support, and security
 
-```ts
-import { CodexSecurity } from "@openai/codex-security";
-
-const security = new CodexSecurity();
-try {
-  const result = await security.run("/path/to/repo", {
-    knowledgeBasePaths: ["/path/to/threat-models", "/path/to/architecture.pdf"],
-  });
-  console.log(result.reportPath);
-} finally {
-  await security.close();
-}
-```
-
-Product documentation is available in the
-[Codex Security guide](https://developers.openai.com/codex/security).
-
-## Support and security
-
-Please use [GitHub issues](https://github.com/openai/codex-security/issues) for
-bugs and feature requests. Report vulnerabilities privately using the
-[security policy](SECURITY.md).
+- [Codex Security overview](https://developers.openai.com/codex/security)
+- [CLI quickstart and reference](https://developers.openai.com/codex/security/cli)
+- [TypeScript SDK guide](https://developers.openai.com/codex/security/sdk)
+- [GitHub issues](https://github.com/openai/codex-security/issues) for bugs and
+  feature requests
+- [Security policy](SECURITY.md) for private vulnerability reporting and safe
+  operation
+- [Contribution guidelines](CONTRIBUTING.md)
 
 This project is licensed under the [Apache-2.0 License](LICENSE).
