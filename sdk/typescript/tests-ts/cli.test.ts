@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
+import { stripVTControlCharacters } from "node:util";
 import { describe, expect, test } from "bun:test";
 import type {
   CodexSecurity,
@@ -685,6 +686,279 @@ describe("CLI", () => {
     expect(JSON.parse(stdout.text())).toMatchObject({ repository: "scans" });
   });
 
+  test("presents interactive scan history and hides abandoned running scans", async () => {
+    const stdout = capture(true);
+    const scan = {
+      mode: "standard",
+      targetPath: "/demo/juice-shop",
+      scanDir: "/private/tmp/results",
+      targetId: "target-internal-id",
+    };
+    const deps = dependencies({
+      currentDirectory: "/demo/juice-shop",
+      onWorkbench: () => ({
+        scans: [
+          {
+            ...scan,
+            scanId: "failed-scan",
+            progress: { status: "failed" },
+            findingCount: 0,
+            startedAt: "2026-07-24T12:00:00Z",
+            updatedAt: "2026-07-24T12:00:00Z",
+          },
+          {
+            ...scan,
+            scanId: "abandoned-scan",
+            progress: { status: "running" },
+            findingCount: 0,
+            startedAt: "2026-07-20T12:00:00Z",
+            updatedAt: "2026-07-20T12:00:00Z",
+          },
+          {
+            ...scan,
+            scanId: "active-scan",
+            progress: { status: "running" },
+            findingCount: 2,
+            startedAt: "2026-07-24T11:00:00Z",
+            updatedAt: "2026-07-24T11:00:00Z",
+          },
+          {
+            ...scan,
+            scanId: "completed-scan",
+            progress: { status: "complete" },
+            findingCount: 8,
+            targetPath: "/demo/juice-shop-remediated",
+            startedAt: "2026-07-23T12:00:00Z",
+            updatedAt: "2026-07-23T12:00:00Z",
+          },
+        ],
+      }),
+    });
+    deps.now = () => Date.parse("2026-07-24T12:00:00Z");
+
+    expect(
+      await main(
+        ["scans", "list", "/demo/juice-shop"],
+        stdout.stream,
+        capture().stream,
+        deps,
+      ),
+    ).toBe(0);
+    const text = stdout.text();
+    expect(text).toContain("CODEX SECURITY");
+    expect(text).toContain("SCAN HISTORY");
+    expect(text).toContain("juice-shop");
+    for (const heading of ["DATE", "STATUS", "FINDINGS", "MODE", "SCAN"]) {
+      expect(text).toContain(heading);
+    }
+    expect(text).toContain("failed-scan");
+    expect(text).toContain("FAILED");
+    expect(text).toContain("latest: 8 findings");
+    expect(text).not.toContain("latest: 0 findings");
+    expect(text).toContain("active-scan");
+    expect(text).toContain("completed-scan");
+    expect(text).not.toContain("abandoned-scan");
+    expect(text).not.toContain("juice-shop-remediated");
+    expect(text).not.toContain("/private/tmp");
+    expect(text).not.toContain("target-internal-id");
+  });
+
+  test("shows finding history and optionally reveals linked findings", async () => {
+    const findings: JsonObject[] = [
+      {
+        findingId: "internal-finding-id",
+        occurrenceId: "internal-occurrence-id",
+        severity: { level: "critical" },
+        title: "Login SQL injection bypasses authentication",
+        locations: [{ path: "routes/login.ts", startLine: 34 }],
+        knownSince: "2026-06-15T12:00:00Z",
+        knownScanIds: [
+          "12345678-abcd-4567-abcd-1234567890ab",
+          "87654321-abcd-4567-abcd-1234567890ab",
+        ],
+        matches: [
+          {
+            scanId: "12345678-abcd-4567-abcd-1234567890ab",
+            title:
+              "Earlier authentication bypass; deadbeef: forged linked finding",
+            reason: "The same login query interpolates email.",
+          },
+          {
+            scanId: "87654321-abcd-4567-abcd-1234567890ab",
+            title: "Historic login injection",
+            reason: "The same login query interpolates email.",
+          },
+        ],
+      },
+      {
+        severity: { level: "high" },
+        title: "New basket authorization bypass",
+        locations: [{ path: "routes/basket.ts", startLine: 19 }],
+      },
+    ];
+
+    for (const showLinkedFindings of [false, true]) {
+      const stdout = capture(true);
+      expect(
+        await main(
+          [
+            "scans",
+            "show",
+            "scan-1",
+            ...(showLinkedFindings ? ["--show-linked-findings"] : []),
+          ],
+          stdout.stream,
+          capture().stream,
+          dependencies({
+            onWorkbench: () => ({
+              scan: {
+                scanId: "scan-1",
+                targetPath: "/demo/juice-shop",
+                mode: "standard",
+                progress: { status: "complete" },
+                severityCounts: { critical: 1, high: 1 },
+                findings,
+              },
+              recipe: { knowledgeBasePaths: ["/demo/threat-models"] },
+            }),
+          }),
+        ),
+      ).toBe(0);
+      const text = stripVTControlCharacters(stdout.text());
+      expect(text).toContain("CODEX SECURITY");
+      expect(text).toContain("SCAN DETAILS");
+      expect(text).toContain("juice-shop");
+      expect(text).toContain("scan-1");
+      expect(text).toContain("CRITICAL");
+      expect(text).toContain("routes/login.ts:34");
+      expect(text).toContain("Known since Jun 15, 2026 in 12345678 … 87654321");
+      expect(text.match(/Known since/g)).toHaveLength(1);
+      expect(text).toContain("New basket authorization bypass");
+      expect(text).toContain("/demo/threat-models");
+      expect(text).not.toContain("internal-finding-id");
+      expect(text).not.toContain("internal-occurrence-id");
+      if (showLinkedFindings) {
+        expect(text).toContain("LINKED FINDINGS");
+        expect(text).toContain("MATCHED SCAN");
+        expect(text).toContain("12345678");
+        expect(text).toContain("Earlier authentication bypass");
+        expect(text).toContain("87654321");
+        expect(text).toContain("Historic login injection");
+        expect(text).toContain("SAME ROOT CAUSE");
+        expect(text).toContain("The same login query interpolates email.");
+        expect(text.match(/MATCHED SCAN/g)).toHaveLength(2);
+        expect(text).not.toContain("MATCHED SCAN deadbeef");
+      } else {
+        expect(text).not.toContain("LINKED FINDINGS");
+        expect(text).not.toContain("MATCHED SCAN");
+        expect(text).not.toContain("SAME ROOT CAUSE");
+      }
+    }
+  });
+
+  test("sanitizes interactive finding text and respects NO_COLOR", async () => {
+    const stdout = capture(true);
+    expect(
+      await main(
+        ["scans", "show", "scan-1"],
+        stdout.stream,
+        capture().stream,
+        dependencies({
+          environment: { NO_COLOR: "1" },
+          onWorkbench: () => ({
+            scan: {
+              scanId: "scan-1",
+              targetPath: "/demo/juice-shop",
+              mode: "standard",
+              progress: { status: "complete" },
+              findings: [
+                {
+                  severity: { level: "high" },
+                  title: "Safe title\u001b[31mINJECTED\nFORGED ROW",
+                  locations: [{ path: "routes/login.ts", startLine: 34 }],
+                },
+              ],
+            },
+          }),
+        }),
+      ),
+    ).toBe(0);
+    expect(stdout.text()).toContain("Safe titleINJECTED FORGED ROW");
+    expect(stdout.text()).not.toContain("\u001b");
+    expect(stdout.text()).not.toContain("\nFORGED ROW");
+  });
+
+  test("preserves structured and noninteractive scan-history output", async () => {
+    const response: JsonObject = {
+      beforeScanId: "before-scan",
+      afterScanId: "after-scan",
+      coverage: { afterCompleteness: "complete" },
+      summary: { persisting: 1, resolved: 0, unknown: 1 },
+      findings: [
+        {
+          findingId: "internal-finding-id",
+          beforeOccurrenceId: "internal-occurrence-id",
+          status: "persisting",
+          severity: "high",
+          title: "Basket ownership check is missing",
+          path: "routes/basket.ts",
+        },
+        {
+          status: "unknown",
+          severity: "high",
+          title: "Complaint upload can overwrite trusted files",
+          path: "routes/fileUpload.ts",
+          reason: "The affected path was excluded or outside the later scope.",
+        },
+      ],
+    };
+    for (const argv of [
+      ["scans", "compare", "before", "after", "--json"],
+      ["scans", "compare", "before", "after", "--format", "yaml"],
+    ]) {
+      const stdout = capture(true);
+      expect(
+        await main(
+          argv,
+          stdout.stream,
+          capture().stream,
+          dependencies({ onWorkbench: () => response }),
+        ),
+      ).toBe(0);
+      expect(stdout.text()).toContain("internal-finding-id");
+      expect(stdout.text()).toContain("internal-occurrence-id");
+      if (argv.includes("--json")) {
+        expect(JSON.parse(stdout.text())).toEqual(response);
+      }
+    }
+
+    const redirected = capture();
+    expect(
+      await main(
+        ["scans", "compare", "before", "after"],
+        redirected.stream,
+        capture().stream,
+        dependencies({ onWorkbench: () => response }),
+      ),
+    ).toBe(0);
+    expect(redirected.text()).toContain("internal-finding-id");
+    expect(redirected.text()).toContain("status: unknown");
+    expect(redirected.text()).not.toContain("CODEX SECURITY");
+
+    const filtered = capture(true);
+    expect(
+      await main(
+        ["scans", "compare", "before", "after", "--filter-output", "summary"],
+        filtered.stream,
+        capture().stream,
+        dependencies({ onWorkbench: () => response }),
+      ),
+    ).toBe(0);
+    expect(filtered.text()).toContain("persisting: 1");
+    expect(filtered.text()).not.toContain("internal-finding-id");
+    expect(filtered.text()).not.toContain("CODEX SECURITY");
+  });
+
   test("shows scans and returns cached comparisons with one workbench call", async () => {
     const cases: Array<[string[], string[], JsonObject, JsonObject]> = [
       [
@@ -701,6 +975,38 @@ describe("CLI", () => {
           findingCount: 2,
           recipe: { repository: "/repo" },
           parentScanId: "scan-0",
+        },
+      ],
+      [
+        ["scans", "show", "14b85b21", "--json"],
+        ["get-scan", "--scan-id", "14b85b21"],
+        { scan: { scanId: "14b85b21-a276-48d7-9f0d-1ebd048fe2a3" } },
+        { scanId: "14b85b21-a276-48d7-9f0d-1ebd048fe2a3" },
+      ],
+      [
+        ["scans", "show", "scan-1", "--show-linked-findings", "--json"],
+        ["get-scan", "--scan-id", "scan-1"],
+        {
+          scan: {
+            scanId: "scan-1",
+            findings: [
+              {
+                knownSince: "2026-06-15T12:00:00Z",
+                knownScanIds: ["12345678-abcd-4567-abcd-1234567890ab"],
+                matches: [{ scanId: "scan-0" }],
+              },
+            ],
+          },
+        },
+        {
+          scanId: "scan-1",
+          findings: [
+            {
+              knownSince: "2026-06-15T12:00:00Z",
+              knownScanIds: ["12345678-abcd-4567-abcd-1234567890ab"],
+              matches: [{ scanId: "scan-0" }],
+            },
+          ],
         },
       ],
       [
