@@ -125,6 +125,7 @@ const VALUE_OPTIONS = new Set([
   "--head",
   "--base",
   "--mode",
+  "--model",
   "--output-dir",
   "--plugin-path",
   "--python",
@@ -155,6 +156,7 @@ interface ScanArguments {
   head?: string;
   base?: string;
   mode: ScanMode;
+  model?: string;
   outputDir?: string;
   archiveExisting: boolean;
   pluginPath?: string;
@@ -796,6 +798,9 @@ export async function main(
             .enum(["standard", "deep"])
             .default("standard")
             .describe("Scan mode."),
+          model: optionValue("--model")
+            .optional()
+            .describe("Model to use for the scan."),
           outputDir: optionValue("--output-dir")
             .optional()
             .describe("Write scan artifacts to DIR."),
@@ -852,6 +857,7 @@ export async function main(
         ),
       examples: [
         { args: { repository: "." } },
+        { args: { repository: "." }, options: { model: "gpt-5.6-terra" } },
         { args: { repository: "." }, options: { path: ["src", "tests"] } },
         { args: { repository: "." }, options: { diff: "origin/main" } },
       ],
@@ -874,6 +880,7 @@ export async function main(
             head: options.head,
             base: options.base,
             mode: options.mode,
+            model: options.model,
             outputDir: options.outputDir,
             archiveExisting: options.archiveExisting,
             pluginPath: options.pluginPath,
@@ -918,6 +925,9 @@ export async function main(
           .describe("Directory for scan artifacts and resumable results."),
         workers: z.number().int().positive().default(4),
         mode: z.enum(["standard", "deep"]).default("standard"),
+        model: optionValue("--model")
+          .optional()
+          .describe("Model to use for each repository."),
         maxAttempts: z
           .number()
           .int()
@@ -947,9 +957,16 @@ export async function main(
           let outputDir: string;
           let githubHost: string | undefined;
           if (args.input === undefined) {
-            if (argv.length !== 1 || argv[0] !== "bulk-scan") {
+            if (
+              argv[0] !== "bulk-scan" ||
+              !(
+                argv.length === 1 ||
+                (argv.length === 3 && argv[1] === "--model") ||
+                (argv.length === 2 && argv[1] === `--model=${options.model}`)
+              )
+            ) {
               throw new Error(
-                "Run 'codex-security bulk-scan' without options to discover repositories, or provide a CSV and --output-dir.",
+                "Run 'codex-security bulk-scan [--model MODEL]' to discover repositories, or provide a CSV and --output-dir.",
               );
             }
             const wizard = await runBulkScanWizard(
@@ -984,7 +1001,7 @@ export async function main(
             config: {
               pluginPath: options.pluginPath,
               pythonPath: options.python,
-              codexOverrides: parseCodexOverrides(options.codex),
+              codexOverrides: parseCodexOverrides(options.codex, options.model),
             },
             createSecurity: dependencies.createSecurity,
             signal: controller.signal,
@@ -2021,7 +2038,8 @@ async function runScan(
       pluginPath: arguments_.pluginPath,
       pythonPath: arguments_.pythonPath,
       codexOverrides:
-        arguments_.codexOverrides ?? parseCodexOverrides(arguments_.codex),
+        arguments_.codexOverrides ??
+        parseCodexOverrides(arguments_.codex, arguments_.model),
     };
     progress = new Progress(errorOutput, dependencies, interactive);
     const scope = scanScope(arguments_);
@@ -2402,8 +2420,12 @@ function targetFromArguments(arguments_: ScanArguments): ScanTarget {
   return "repository";
 }
 
-export function parseCodexOverrides(values: readonly string[]): JsonObject {
+export function parseCodexOverrides(
+  values: readonly string[],
+  model?: string,
+): JsonObject {
   const result = Object.create(null) as JsonObject;
+  if (model !== undefined) result["model"] = model;
   for (const value of values) {
     const separator = value.indexOf("=");
     const key = separator < 0 ? "" : value.slice(0, separator);
@@ -2451,7 +2473,11 @@ export function parseCodexOverrides(values: readonly string[]): JsonObject {
     }
     const final = parts.at(-1)!;
     if (Object.hasOwn(cursor, final)) {
-      throw new CodexSecurityError("Duplicate --codex key");
+      throw new CodexSecurityError(
+        model !== undefined && key === "model"
+          ? "--model conflicts with --codex model"
+          : "Duplicate --codex key",
+      );
     }
     cursor[final] = parsed;
   }
