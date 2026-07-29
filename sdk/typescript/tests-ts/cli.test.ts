@@ -153,12 +153,16 @@ describe("CLI", () => {
     );
     expect(manifest.text()).toContain("opencode-security bulk-scan [input]");
     expect(manifest.text()).toContain("opencode-security export <scanDir>");
-    expect(manifest.text()).toContain("opencode-security validate <findings...>");
+    expect(manifest.text()).toContain(
+      "opencode-security validate <findings...>",
+    );
     expect(manifest.text()).toContain("opencode-security patch <issues...>");
     expect(manifest.text()).toContain(
       "opencode-security findings false-positive <occurrenceId>",
     );
-    expect(manifest.text()).toContain("opencode-security scans list [repository]");
+    expect(manifest.text()).toContain(
+      "opencode-security scans list [repository]",
+    );
     expect(manifest.text()).toContain("opencode-security scans show <scanId>");
     expect(manifest.text()).toContain("opencode-security scans rerun <scanId>");
     expect(manifest.text()).toContain(
@@ -1141,7 +1145,9 @@ describe("CLI", () => {
     expect(
       await main(["export", "--help"], stdout.stream, stderr.stream, deps),
     ).toBe(0);
-    expect(stdout.text()).toContain("Usage: opencode-security export <scanDir>");
+    expect(stdout.text()).toContain(
+      "Usage: opencode-security export <scanDir>",
+    );
     expect(stdout.text()).toContain("--export-format <csv|json|sarif>");
     expect(stdout.text()).toContain("--source-root <string>");
     expect(stdout.text()).not.toContain("--format {sarif}");
@@ -1552,7 +1558,9 @@ describe("CLI", () => {
         dependencies(),
       ),
     ).toBe(0);
-    expect(stdout.text()).toContain("Usage: opencode-security scan [repository]");
+    expect(stdout.text()).toContain(
+      "Usage: opencode-security scan [repository]",
+    );
     expect(stderr.text()).toBe("");
   });
 
@@ -1722,7 +1730,9 @@ describe("CLI", () => {
     });
 
     expect(await main(["scan"], stdout.stream, stderr.stream, deps)).toBe(2);
-    expect(stderr.text()).toContain("Could not save the OpenCode Security scan");
+    expect(stderr.text()).toContain(
+      "Could not save the OpenCode Security scan",
+    );
     expect(stderr.text()).toContain("unable to open database file");
     expect(stderr.text()).not.toContain("model service could not be reached");
     expect(stderr.text()).not.toContain("Check your network connection");
@@ -2278,7 +2288,9 @@ describe("CLI", () => {
       await main(["scan", "."], stdout.stream, stderr.stream, failing),
     ).toBe(2);
     expect(stdout.text()).toBe("");
-    expect(stderr.text()).toContain("opencode-security: invalid scan request\n");
+    expect(stderr.text()).toContain(
+      "opencode-security: invalid scan request\n",
+    );
     expect(stderr.text()).not.toContain("Running scan");
     expect(stderr.text()).not.toContain("CodexSecurityError");
   });
@@ -2303,7 +2315,9 @@ describe("CLI", () => {
       ),
     ).toBe(2);
     expect(stdout.text()).toBe("");
-    expect(stderr.text()).toContain("opencode-security: invalid scan request\n");
+    expect(stderr.text()).toContain(
+      "opencode-security: invalid scan request\n",
+    );
 
     const unavailableCwd = dependencies();
     unavailableCwd.currentDirectory = () => {

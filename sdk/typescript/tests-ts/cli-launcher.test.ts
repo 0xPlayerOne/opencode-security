@@ -72,7 +72,10 @@ describe("CLI launcher", () => {
       const launcher = join(root, "bin", "opencode-security.mjs");
       await mkdir(join(root, "bin"), { recursive: true });
       await mkdir(join(root, "dist"), { recursive: true });
-      await copyFile(join(packageRoot, "bin", "opencode-security.mjs"), launcher);
+      await copyFile(
+        join(packageRoot, "bin", "opencode-security.mjs"),
+        launcher,
+      );
       await writeFile(
         join(root, "dist", "cli.js"),
         `throw new Error(${JSON.stringify(`failed ${SYNTHETIC_CREDENTIALS}`)});\n`,
@@ -118,7 +121,10 @@ describe("CLI launcher", () => {
 
       const launcher = join(installed, "bin", "opencode-security.mjs");
       await mkdir(join(installed, "bin"), { recursive: true });
-      await copyFile(join(packageRoot, "bin", "opencode-security.mjs"), launcher);
+      await copyFile(
+        join(packageRoot, "bin", "opencode-security.mjs"),
+        launcher,
+      );
       await copyFile(
         join(packageRoot, "package.json"),
         join(installed, "package.json"),

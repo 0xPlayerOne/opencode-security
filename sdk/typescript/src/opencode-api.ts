@@ -7,10 +7,7 @@ import {
   ScanInterruptedError,
 } from "./errors.js";
 import { estimateScanCost, type ScanCost } from "./cost.js";
-import {
-  loadContract,
-  type ScanExpectation,
-} from "./contract.js";
+import { loadContract, type ScanExpectation } from "./contract.js";
 import {
   prepareKnowledgeBase,
   type PreparedKnowledgeBase,
@@ -39,15 +36,8 @@ import {
   type NormalizedTarget,
   type ScanMode,
 } from "./targets.js";
-import {
-  runOpenCode,
-  type OpenCodeRunResult,
-} from "./opencode-runtime.js";
-import type {
-  ScanAuthentication,
-  ScanOptions,
-  ScanPreflight,
-} from "./api.js";
+import { runOpenCode, type OpenCodeRunResult } from "./opencode-runtime.js";
+import type { ScanAuthentication, ScanOptions, ScanPreflight } from "./api.js";
 import type { CodexSecurityConfig } from "./config.js";
 
 export interface OpenCodeSecurityConfig extends CodexSecurityConfig {
@@ -331,7 +321,8 @@ export class OpenCodeSecurity {
   }
 
   private requireOpen(): void {
-    if (this.#closed) throw new CodexSecurityError("OpenCodeSecurity is closed.");
+    if (this.#closed)
+      throw new CodexSecurityError("OpenCodeSecurity is closed.");
   }
 }
 
@@ -395,8 +386,7 @@ async function resolveStateDirectory(
     environment["OPENCODE_SECURITY_STATE_DIR"]?.trim() ??
     environment["CODEX_SECURITY_STATE_DIR"]?.trim();
   const state =
-    configured ??
-    join(homedir(), ".local", "state", "opencode-security");
+    configured ?? join(homedir(), ".local", "state", "opencode-security");
   await mkdir(state, { recursive: true, mode: 0o700 });
   return await realpath(state);
 }
@@ -470,6 +460,9 @@ function estimateOpenCodeCost(
   return estimateScanCost(model, result.usage);
 }
 
-function stringField(value: Record<string, unknown>, key: string): string | null {
+function stringField(
+  value: Record<string, unknown>,
+  key: string,
+): string | null {
   return typeof value[key] === "string" ? value[key] : null;
 }

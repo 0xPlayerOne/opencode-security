@@ -116,10 +116,7 @@ export async function runOpenCode(
       if (type === "step_finish" && part !== null) {
         const stepUsage = normalizeUsage(part["tokens"]);
         if (stepUsage !== null) usage = addUsage(usage, stepUsage);
-        if (
-          typeof part["cost"] === "number" &&
-          Number.isFinite(part["cost"])
-        ) {
+        if (typeof part["cost"] === "number" && Number.isFinite(part["cost"])) {
           costUsd += part["cost"];
           sawCost = true;
           if (
@@ -138,9 +135,9 @@ export async function runOpenCode(
         const message =
           typeof event.error === "string"
             ? event.error
-              : isRecord(event.error) &&
-                  typeof event.error["message"] === "string"
-                ? event.error["message"]
+            : isRecord(event.error) &&
+                typeof event.error["message"] === "string"
+              ? event.error["message"]
               : "OpenCode reported an unknown error.";
         throw new Error(message);
       }

@@ -252,7 +252,9 @@ try {
     consumer,
     "node_modules",
     ".bin",
-    process.platform === "win32" ? "opencode-security.cmd" : "opencode-security",
+    process.platform === "win32"
+      ? "opencode-security.cmd"
+      : "opencode-security",
   );
   assert.equal(
     (await stat(shim)).isFile(),

@@ -4,10 +4,7 @@ export type {
   OpenCodeSecurityConfig,
   OpenCodeSecurityMetadata,
 } from "./opencode-api.js";
-export {
-  resolveOpenCodeCommand,
-  runOpenCode,
-} from "./opencode-runtime.js";
+export { resolveOpenCodeCommand, runOpenCode } from "./opencode-runtime.js";
 export type {
   OpenCodeRunOptions,
   OpenCodeRunResult,
