@@ -184,6 +184,7 @@ export class OpenCodeSecurity {
     const workbenchEnvironment: ProcessEnvironment = {
       ...environment,
       PYTHON: python,
+      PYTHONDONTWRITEBYTECODE: "1",
       CODEX_SECURITY_STATE_DIR: stateDirectory,
     };
     const workbenchOptions: WorkbenchCommandOptions = {
@@ -256,6 +257,7 @@ export class OpenCodeSecurity {
     const scanEnvironment = {
       ...environment,
       PYTHON: python,
+      PYTHONDONTWRITEBYTECODE: "1",
       CODEX_SECURITY_STARTED_AT: new Date().toISOString(),
       CODEX_SECURITY_REPOSITORY: inputs.repository,
       CODEX_SECURITY_SCAN_DIR: scanDir,
