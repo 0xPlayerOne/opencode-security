@@ -39,7 +39,7 @@ jobs:
         run: corepack enable && corepack prepare "$(node -p 'require("./sdk/typescript/package.json").packageManager')" --activate
 
       - name: Install dependencies
-        run: pnpm --dir sdk/typescript install --frozen-lockfile
+        run: pnpm --dir sdk/typescript install --frozen-lockfile --ignore-scripts
 
       - name: Typecheck
         run: pnpm --dir sdk/typescript run types
