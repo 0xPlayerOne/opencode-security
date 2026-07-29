@@ -80,10 +80,12 @@ jobs:
         run: corepack enable pnpm && corepack prepare pnpm@11.13.1 --activate
 
       - name: Install scanner
-        run: pnpm --dir .opencode-security/sdk/typescript install --frozen-lockfile --ignore-scripts
+        working-directory: .opencode-security/sdk/typescript
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Build scanner
-        run: pnpm --dir .opencode-security/sdk/typescript run build
+        working-directory: .opencode-security/sdk/typescript
+        run: pnpm run build
 
       - name: Run scan
         shell: bash
