@@ -98,6 +98,7 @@ jobs:
           set -euo pipefail
           output_dir="$RUNNER_TEMP/opencode-security-results"
           mkdir -p "$output_dir"
+          chmod 700 "$output_dir"
           args=(
             "$GITHUB_WORKSPACE"
             --model "$MODEL"
