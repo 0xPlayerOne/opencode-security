@@ -77,7 +77,7 @@ jobs:
 
       - name: Enable pnpm
         shell: bash
-        run: corepack enable && corepack prepare "$(node -p 'require("./.opencode-security/sdk/typescript/package.json").packageManager')" --activate
+        run: corepack enable pnpm && corepack prepare pnpm@11.13.1 --activate
 
       - name: Install scanner
         run: pnpm --dir .opencode-security/sdk/typescript install --frozen-lockfile --ignore-scripts
