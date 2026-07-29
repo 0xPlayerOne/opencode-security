@@ -4,7 +4,7 @@
   "scan": {
     "id": "scan_example_001",
     "producer": {
-      "name": "codex-security-plugin",
+      "name": "opencode-security-plugin",
       "version": "0.1.0"
     },
     "status": "completed",

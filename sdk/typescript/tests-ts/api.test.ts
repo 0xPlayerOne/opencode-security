@@ -1372,7 +1372,7 @@ describe("CodexSecurity orchestration", () => {
     expect(prompt).toContain('Repository root: "$CODEX_SECURITY_REPOSITORY"');
     expect(prompt).toContain('Use "$PYTHON" as <python_command>');
     expect(prompt).toContain("$CODEX_SECURITY_TARGET_DISPLAY_NAME");
-    expect(prompt).toContain("codex-security-plugin");
+    expect(prompt).toContain("opencode-security-plugin");
     expect(prompt).not.toContain("CODEX_SECURITY_KNOWLEDGE_BASE");
     expect(prompt).not.toContain("false_positive_feedback.json");
     expect(

@@ -24,7 +24,7 @@ from typing import Any, BinaryIO, TextIO
 from urllib.parse import quote, urlsplit
 
 SCHEMA_VERSION = "1.0"
-PRODUCER_NAME = "codex-security-plugin"
+PRODUCER_NAME = "opencode-security-plugin"
 FINGERPRINT_ALGORITHM = "codex-security/v1"
 SARIF_SCHEMA = "https://docs.oasis-open.org/sarif/sarif/v2.1.0/os/schemas/sarif-schema-2.1.0.json"
 SEVERITIES = {"critical", "high", "medium", "low", "informational"}

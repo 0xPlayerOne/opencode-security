@@ -1298,7 +1298,7 @@ async function scanPrompt(
     'Use exactly "$CODEX_SECURITY_SCAN_ID" as the scan ID in the manifest, findings, and coverage.',
     'Use exactly "$CODEX_SECURITY_TARGET_ID" as scan.target.targetId; do not derive a different target ID.',
     'Use exactly "$CODEX_SECURITY_TARGET_DISPLAY_NAME" as scan.target.displayName; do not infer a display name from the Git remote.',
-    'Use exactly "codex-security-plugin" as scan.producer.name.',
+    'Use exactly "opencode-security-plugin" as scan.producer.name.',
     ...(hasConfigPath
       ? [
           'For normal config-preflight helper calls, append --config "$CODEX_SECURITY_CONFIG_PATH" so preflight reads the sanitized active runtime config. Preserve the documented runtime and --effective-config arguments for session-only values.',

@@ -24,7 +24,7 @@ const DOCUMENTS = {
   "findings.json": "findings.schema.json",
   "coverage.json": "coverage.schema.json",
 } as const;
-const PRODUCER_NAME = "codex-security-plugin";
+const PRODUCER_NAME = "opencode-security-plugin";
 const MAX_CONTRACT_DOCUMENT_BYTES = {
   "scan-manifest.json": 16 * 1024 * 1024,
   "findings.json": 128 * 1024 * 1024,
@@ -474,7 +474,7 @@ function validateExpectation(
   }
   if (scan.producer.version !== expectation.pluginVersion) {
     throw new ContractValidationError(
-      "Manifest producer version does not match the installed Codex Security plugin.",
+      "Manifest producer version does not match the installed OpenCode Security plugin.",
     );
   }
 

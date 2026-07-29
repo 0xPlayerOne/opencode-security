@@ -14,7 +14,7 @@ const manifest = {
   schemaVersion: "1.0",
   scan: {
     id: "scan",
-    producer: { name: "codex-security-plugin", version: "0.1.14" },
+    producer: { name: "opencode-security-plugin", version: "0.1.14" },
     status: "completed",
     startedAt: "2026-01-01T00:00:00Z",
     completedAt: "2026-01-01T00:00:01Z",

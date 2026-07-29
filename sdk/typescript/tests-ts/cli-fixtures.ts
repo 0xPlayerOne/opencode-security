@@ -163,7 +163,7 @@ export function fakeResult(
     schemaVersion: "1.0",
     scan: {
       id: "scan",
-      producer: { name: "codex-security-plugin", version: "1.2.3" },
+      producer: { name: "opencode-security-plugin", version: "1.2.3" },
       status: "completed",
       startedAt: "2026-01-01T00:00:00Z",
       completedAt: "2026-01-01T00:00:01Z",

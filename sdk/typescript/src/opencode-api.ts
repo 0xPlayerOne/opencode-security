@@ -442,6 +442,7 @@ function scanPrompt(
     'Scan ID: "$CODEX_SECURITY_SCAN_ID"',
     'Target ID: "$CODEX_SECURITY_TARGET_ID"',
     'Target display name: "$CODEX_SECURITY_TARGET_DISPLAY_NAME"',
+    'Use exactly "opencode-security-plugin" as scan.producer.name.',
     'Plugin root: "$CODEX_SECURITY_PLUGIN_ROOT"',
     `Scan target: ${targetText}.`,
     ...(knowledgeBase === null
