@@ -1,6 +1,6 @@
 services:
-  codex-security:
-    image: ${CODEX_SECURITY_IMAGE:-codex-security:local}
+  opencode-security:
+    image: ${CODEX_SECURITY_IMAGE:-opencode-security:local}
     build:
       context: .
     init: true
@@ -9,9 +9,10 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-      - seccomp=${CODEX_SECURITY_SECCOMP:-./docker/codex-security-seccomp.json}
+      - seccomp=${CODEX_SECURITY_SECCOMP:-./docker/opencode-security-seccomp.json}
     environment:
       CODEX_API_KEY:
+      OPENCODE_API_KEY:
       CODEX_SECURITY_GIT_HOST:
       GH_TOKEN:
       GITHUB_TOKEN:

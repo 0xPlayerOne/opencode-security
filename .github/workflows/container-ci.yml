@@ -81,24 +81,24 @@ jobs:
           load: true
           platforms: linux/amd64
           push: false
-          tags: codex-security:ci
+          tags: opencode-security:ci
 
       - name: Verify bundled scanner
         run: |
-          docker run --rm codex-security:ci --version
-          docker run --rm codex-security:ci bulk-scan --help
-          docker run --rm codex-security:ci info --json
+          docker run --rm opencode-security:ci --version
+          docker run --rm opencode-security:ci bulk-scan --help
+          docker run --rm opencode-security:ci info --json
 
       - name: Validate hardened customer Compose configuration
         env:
-          CODEX_SECURITY_IMAGE: codex-security:ci
+          CODEX_SECURITY_IMAGE: opencode-security:ci
         run: |
           mkdir -p results state
           chmod 700 results state
           printf 'id,repository,revision\n' > repositories.csv
           export CODEX_SECURITY_USER="$(id -u):$(id -g)"
           docker compose config --quiet
-          docker compose run --rm codex-security --version
+          docker compose run --rm opencode-security --version
 
       - name: Verify hardened Codex command sandbox
         shell: bash
@@ -108,10 +108,10 @@ jobs:
             docker run --rm
             --cap-drop ALL
             --security-opt no-new-privileges
-            --security-opt "seccomp=$GITHUB_WORKSPACE/docker/codex-security-seccomp.json"
+            --security-opt "seccomp=$GITHUB_WORKSPACE/docker/opencode-security-seccomp.json"
             --entrypoint node
-            codex-security:ci
-            /usr/local/lib/node_modules/@openai/codex-security/node_modules/@openai/codex/bin/codex.js
+            opencode-security:ci
+            /usr/local/lib/node_modules/opencode-security/node_modules/@openai/codex/bin/codex.js
           )
 
           if output="$("${command[@]}" sandbox /usr/bin/true 2>&1)"; then
@@ -128,7 +128,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if output="$(docker run --rm -t codex-security:ci bulk-scan 2>&1)"; then
+          if output="$(docker run --rm -t opencode-security:ci bulk-scan 2>&1)"; then
             echo "The customer container must require a repository CSV." >&2
             exit 1
           else
@@ -138,7 +138,7 @@ jobs:
             printf 'The customer container returned unexpected exit status %s:\n%s\n' "$status" "$output" >&2
             exit 1
           fi
-          expected='codex-security: bulk-scan requires a repository CSV; interactive discovery is not supported in this image.'
+          expected='opencode-security: bulk-scan requires a repository CSV; interactive discovery is not supported in this image.'
           if [[ "${output//$'\r'/}" != "$expected" ]]; then
             printf 'The customer container returned an unexpected repository discovery error:\n%s\n' "$output" >&2
             exit 1
@@ -151,5 +151,5 @@ jobs:
           docker run --rm \
             --entrypoint /bin/sh \
             --env GH_TOKEN=SYNTHETIC_GITHUB_TOKEN \
-            codex-security:ci \
-            -ec 'actual="$(printf "protocol=https\nhost=github.com\n\n" | /usr/local/bin/codex-security-git-credential get)"; test "$actual" = "$(printf "username=x-access-token\npassword=SYNTHETIC_GITHUB_TOKEN")"; test -z "$(printf "protocol=https\nhost=untrusted.example\n\n" | /usr/local/bin/codex-security-git-credential get)"'
+            opencode-security:ci \
+            -ec 'actual="$(printf "protocol=https\nhost=github.com\n\n" | /usr/local/bin/opencode-security-git-credential get)"; test "$actual" = "$(printf "username=x-access-token\npassword=SYNTHETIC_GITHUB_TOKEN")"; test -z "$(printf "protocol=https\nhost=untrusted.example\n\n" | /usr/local/bin/opencode-security-git-credential get)"'
