@@ -174,12 +174,12 @@ assert.equal(
   "Plugin contract must not contain duplicate installed paths.",
 );
 
-const consumer = await mkdtemp(join(tmpdir(), "codex-security-package-"));
+const consumer = await mkdtemp(join(tmpdir(), "opencode-security-package-"));
 try {
   await writeFile(
     join(consumer, "package.json"),
     `${JSON.stringify({
-      name: "codex-security-package-smoke",
+      name: "opencode-security-package-smoke",
       private: true,
       type: "module",
     })}\n`,
@@ -224,19 +224,19 @@ try {
     [
       "--input-type=module",
       "--eval",
-      `const sdk = await import(${JSON.stringify(packageManifest.name)}); if (typeof sdk.CodexSecurity !== "function") throw new Error("The installed package does not export CodexSecurity.");`,
+      `const sdk = await import(${JSON.stringify(packageManifest.name)}); if (typeof sdk.OpenCodeSecurity !== "function") throw new Error("The installed package does not export OpenCodeSecurity.");`,
     ],
     { cwd: consumer },
   );
 
   assert.equal(
-    typeof installedManifest.bin?.["codex-security"],
+    typeof installedManifest.bin?.["opencode-security"],
     "string",
-    "Installed package must declare the codex-security launcher.",
+    "Installed package must declare the opencode-security launcher.",
   );
   const launcher = resolve(
     installedRoot,
-    installedManifest.bin["codex-security"],
+    installedManifest.bin["opencode-security"],
   );
   assert.ok(
     launcher.startsWith(`${installedRoot}${sep}`),
@@ -252,12 +252,12 @@ try {
     consumer,
     "node_modules",
     ".bin",
-    process.platform === "win32" ? "codex-security.cmd" : "codex-security",
+    process.platform === "win32" ? "opencode-security.cmd" : "opencode-security",
   );
   assert.equal(
     (await stat(shim)).isFile(),
     true,
-    "npm must create the published codex-security executable shim.",
+    "npm must create the published opencode-security executable shim.",
   );
 
   function runInstalledCli(argument) {
@@ -277,7 +277,7 @@ try {
   assert.equal(version.trim(), packageManifest.version);
 
   const help = runInstalledCli("--help");
-  assert.match(help, /Usage: codex-security\b/u);
+  assert.match(help, /Usage: opencode-security\b/u);
 
   console.log(
     `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, CLI, and ${expectedPluginFiles.length} bundled plugin files.`,

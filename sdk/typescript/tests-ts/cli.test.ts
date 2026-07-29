@@ -76,7 +76,7 @@ describe("CLI", () => {
     const root = capture();
     const stderr = capture();
     expect(await main([], root.stream, stderr.stream, dependencies())).toBe(0);
-    expect(root.text()).toContain("Usage: codex-security <command>");
+    expect(root.text()).toContain("Usage: opencode-security <command>");
     expect(root.text()).toContain("bulk-scan");
     expect(root.text()).toContain("install-hook");
     expect(root.text()).not.toContain("multiscan");
@@ -147,27 +147,27 @@ describe("CLI", () => {
     expect(
       await main(["--llms"], manifest.stream, capture().stream, dependencies()),
     ).toBe(0);
-    expect(manifest.text()).toContain("codex-security scan [repository]");
+    expect(manifest.text()).toContain("opencode-security scan [repository]");
     expect(manifest.text()).toContain(
-      "codex-security install-hook [repository]",
+      "opencode-security install-hook [repository]",
     );
-    expect(manifest.text()).toContain("codex-security bulk-scan [input]");
-    expect(manifest.text()).toContain("codex-security export <scanDir>");
-    expect(manifest.text()).toContain("codex-security validate <findings...>");
-    expect(manifest.text()).toContain("codex-security patch <issues...>");
+    expect(manifest.text()).toContain("opencode-security bulk-scan [input]");
+    expect(manifest.text()).toContain("opencode-security export <scanDir>");
+    expect(manifest.text()).toContain("opencode-security validate <findings...>");
+    expect(manifest.text()).toContain("opencode-security patch <issues...>");
     expect(manifest.text()).toContain(
-      "codex-security findings false-positive <occurrenceId>",
+      "opencode-security findings false-positive <occurrenceId>",
     );
-    expect(manifest.text()).toContain("codex-security scans list [repository]");
-    expect(manifest.text()).toContain("codex-security scans show <scanId>");
-    expect(manifest.text()).toContain("codex-security scans rerun <scanId>");
+    expect(manifest.text()).toContain("opencode-security scans list [repository]");
+    expect(manifest.text()).toContain("opencode-security scans show <scanId>");
+    expect(manifest.text()).toContain("opencode-security scans rerun <scanId>");
     expect(manifest.text()).toContain(
-      "codex-security scans match [beforeId] [afterId]",
+      "opencode-security scans match [beforeId] [afterId]",
     );
     expect(manifest.text()).toContain(
-      "codex-security scans compare <beforeId> <afterId>",
+      "opencode-security scans compare <beforeId> <afterId>",
     );
-    expect(manifest.text()).toContain("codex-security info");
+    expect(manifest.text()).toContain("opencode-security info");
 
     const completions = capture();
     expect(
@@ -343,7 +343,7 @@ describe("CLI", () => {
       const trustedHook = await readFile(hook, "utf8");
       await writeFile(
         hook,
-        "#!/bin/sh\nset -eu\nexec npx --no-install codex-security scan . --working-tree --fail-on-severity medium\n",
+        "#!/bin/sh\nset -eu\nexec npx --no-install opencode-security scan . --working-tree --fail-on-severity medium\n",
       );
       const migratedHook = capture();
       expect(
@@ -648,7 +648,7 @@ describe("CLI", () => {
       codexSdkVersion: "0.144.6",
       model: "gpt-5.6-sol",
       reasoningEffort: "xhigh",
-      nextStep: "codex-security scan . --dry-run",
+      nextStep: "opencode-security scan . --dry-run",
     });
   }, 30_000);
 
@@ -966,7 +966,7 @@ describe("CLI", () => {
     expect(JSON.parse(stdout.text())).toEqual({
       model: "gpt-5.6-sol",
       reasoningEffort: "xhigh",
-      nextStep: "codex-security scan . --dry-run",
+      nextStep: "opencode-security scan . --dry-run",
     });
     expect(stderr.text()).toBe("");
   });
@@ -1008,14 +1008,14 @@ describe("CLI", () => {
       );
       expect(child.status).toBe(0);
       expect(child.stdout).toContain(
-        "command: npx --yes @openai/codex-security --mcp",
+        "command: npx --yes opencode-security --mcp",
       );
       const config = JSON.parse(
         await readFile(join(home, ".config", "amp", "settings.json"), "utf8"),
       );
-      expect(config["amp.mcpServers"]["codex-security"]).toEqual({
+      expect(config["amp.mcpServers"]["opencode-security"]).toEqual({
         command: "npx",
-        args: ["--yes", "@openai/codex-security", "--mcp"],
+        args: ["--yes", "opencode-security", "--mcp"],
       });
     } finally {
       await rm(home, { recursive: true, force: true });
@@ -1141,7 +1141,7 @@ describe("CLI", () => {
     expect(
       await main(["export", "--help"], stdout.stream, stderr.stream, deps),
     ).toBe(0);
-    expect(stdout.text()).toContain("Usage: codex-security export <scanDir>");
+    expect(stdout.text()).toContain("Usage: opencode-security export <scanDir>");
     expect(stdout.text()).toContain("--export-format <csv|json|sarif>");
     expect(stdout.text()).toContain("--source-root <string>");
     expect(stdout.text()).not.toContain("--format {sarif}");
@@ -1172,9 +1172,9 @@ describe("CLI", () => {
       expect(await readFile(join(dist, "cli.js"), "utf8")).toContain(
         'from "./api.js"',
       );
-      const launcher = join(installed, "bin", "codex-security.mjs");
+      const launcher = join(installed, "bin", "opencode-security.mjs");
       await mkdir(join(installed, "bin"), { recursive: true });
-      await copyFile(join(source, "bin", "codex-security.mjs"), launcher);
+      await copyFile(join(source, "bin", "opencode-security.mjs"), launcher);
       await copyFile(
         join(source, "package.json"),
         join(installed, "package.json"),
@@ -1233,7 +1233,7 @@ describe("CLI", () => {
       expect([failed.status, failed.stdout, failed.stderr]).toEqual([
         2,
         "",
-        "codex-security: working directory is unavailable\n",
+        "opencode-security: working directory is unavailable\n",
       ]);
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -1258,12 +1258,12 @@ describe("CLI", () => {
         dependencies(),
       ),
     ).toBe(0);
-    expect(help.text()).toContain("Usage: codex-security scan [repository]");
+    expect(help.text()).toContain("Usage: opencode-security scan [repository]");
     expect(help.text()).toContain("--path <array>");
     expect(help.text()).toContain("--max-cost <number>");
     expect(help.text()).toContain("--model <string>");
     expect(help.text()).toContain(
-      "codex-security scan . --model gpt-5.6-terra",
+      "opencode-security scan . --model gpt-5.6-terra",
     );
     expect(help.text()).toContain("--format <toon|json|yaml|md|jsonl>");
   });
@@ -1552,7 +1552,7 @@ describe("CLI", () => {
         dependencies(),
       ),
     ).toBe(0);
-    expect(stdout.text()).toContain("Usage: codex-security scan [repository]");
+    expect(stdout.text()).toContain("Usage: opencode-security scan [repository]");
     expect(stderr.text()).toBe("");
   });
 
@@ -1710,7 +1710,7 @@ describe("CLI", () => {
       run: async () => {
         throw new CodexSecurityError(
           [
-            "Could not save the Codex Security scan: Traceback (most recent call last):",
+            "Could not save the OpenCode Security scan: Traceback (most recent call last):",
             "    with closing(connect()) as connection:",
             "sqlite3.OperationalError: unable to open database file",
             "token=sk-proj-SYNTHETIC_DATABASE_SECRET_123",
@@ -1722,7 +1722,7 @@ describe("CLI", () => {
     });
 
     expect(await main(["scan"], stdout.stream, stderr.stream, deps)).toBe(2);
-    expect(stderr.text()).toContain("Could not save the Codex Security scan");
+    expect(stderr.text()).toContain("Could not save the OpenCode Security scan");
     expect(stderr.text()).toContain("unable to open database file");
     expect(stderr.text()).not.toContain("model service could not be reached");
     expect(stderr.text()).not.toContain("Check your network connection");
@@ -1760,7 +1760,7 @@ describe("CLI", () => {
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
     expect(stderr.text()).toContain(
-      `codex-security: warning: onWorkerStatus observer failed: status observer failed ${REDACTED_CREDENTIALS}`,
+      `opencode-security: warning: onWorkerStatus observer failed: status observer failed ${REDACTED_CREDENTIALS}`,
     );
     expect(stderr.text()).not.toContain("SYNTHETIC_OPENAI_VALUE_123");
   });
@@ -1892,7 +1892,7 @@ describe("CLI", () => {
     expect(stderr.text()).toContain("Estimated cost: $0.00625 USD.");
     expect(stderr.text()).toContain("Results: /tmp/scan");
     expect(stderr.text()).toContain(
-      "Next: codex-security export /tmp/scan --export-format sarif",
+      "Next: opencode-security export /tmp/scan --export-format sarif",
     );
   });
 
@@ -2278,7 +2278,7 @@ describe("CLI", () => {
       await main(["scan", "."], stdout.stream, stderr.stream, failing),
     ).toBe(2);
     expect(stdout.text()).toBe("");
-    expect(stderr.text()).toContain("codex-security: invalid scan request\n");
+    expect(stderr.text()).toContain("opencode-security: invalid scan request\n");
     expect(stderr.text()).not.toContain("Running scan");
     expect(stderr.text()).not.toContain("CodexSecurityError");
   });
@@ -2303,7 +2303,7 @@ describe("CLI", () => {
       ),
     ).toBe(2);
     expect(stdout.text()).toBe("");
-    expect(stderr.text()).toContain("codex-security: invalid scan request\n");
+    expect(stderr.text()).toContain("opencode-security: invalid scan request\n");
 
     const unavailableCwd = dependencies();
     unavailableCwd.currentDirectory = () => {
@@ -2328,7 +2328,7 @@ describe("CLI", () => {
     const worktree = join(root, "worktree");
     const repository = join(worktree, "packages", "service");
     const output = join(worktree, "scan");
-    const suggestion = join(root, "worktree-codex-security-scan");
+    const suggestion = join(root, "worktree-opencode-security-scan");
     await mkdir(repository, { recursive: true });
     const stdout = capture();
     const stderr = capture();
@@ -2492,7 +2492,7 @@ describe("CLI", () => {
       expect(stdout.text()).toBe("");
       expect(stderr.text()).toBe(
         "[00:00] Preparing scan\n" +
-          `codex-security: scan failed ${REDACTED_CREDENTIALS}\n`,
+          `opencode-security: scan failed ${REDACTED_CREDENTIALS}\n`,
       );
     }
   });

@@ -1,16 +1,16 @@
 {
-  "name": "@openai/codex-security",
+  "name": "opencode-security",
   "version": "0.1.1",
-  "description": "TypeScript SDK and CLI for Codex Security",
+  "description": "OpenCode-powered security CLI and TypeScript SDK",
   "license": "Apache-2.0",
-  "author": "OpenAI",
-  "homepage": "https://developers.openai.com/codex/security",
+  "author": "OpenCode Security contributors",
+  "homepage": "https://github.com/0xPlayerOne/opencode-security",
   "repository": {
     "type": "git",
-    "url": "https://github.com/openai/codex-security.git",
+    "url": "https://github.com/0xPlayerOne/opencode-security.git",
     "directory": "sdk/typescript"
   },
-  "bugs": "https://github.com/openai/codex-security/issues",
+  "bugs": "https://github.com/0xPlayerOne/opencode-security/issues",
   "type": "module",
   "engines": {
     "node": ">=22"
@@ -26,7 +26,7 @@
     }
   },
   "bin": {
-    "codex-security": "./bin/codex-security.mjs"
+    "opencode-security": "./bin/opencode-security.mjs"
   },
   "files": [
     "bin",
@@ -60,6 +60,7 @@
     "fast-uri": "3.1.4",
     "fflate": "0.8.2",
     "incur": "0.4.13",
+    "opencode-ai": "1.18.8",
     "papaparse": "5.5.3",
     "pdfjs-dist": "5.6.205",
     "smol-toml": "1.6.1"

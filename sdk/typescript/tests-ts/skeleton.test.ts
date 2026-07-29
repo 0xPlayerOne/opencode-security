@@ -71,7 +71,7 @@ describe("TypeScript package skeleton", () => {
     const stdout = capture();
     const stderr = capture();
     expect(await main([], stdout.stream, stderr.stream)).toBe(0);
-    expect(stdout.text()).toContain("Usage: codex-security <command>");
+    expect(stdout.text()).toContain("Usage: opencode-security <command>");
     expect(stdout.text()).toContain("Integrations:");
     expect(stderr.text()).toBe("");
 
@@ -86,7 +86,7 @@ describe("TypeScript package skeleton", () => {
       await main(["scan", "--help"], scanHelpOutput.stream, stderr.stream),
     ).toBe(0);
     expect(scanHelpOutput.text()).toContain(
-      "Usage: codex-security scan [repository]",
+      "Usage: opencode-security scan [repository]",
     );
   });
 });

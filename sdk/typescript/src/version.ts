@@ -11,7 +11,7 @@ export const CODEX_SDK_VERSION = PACKAGE_VERSIONS.sdk;
 export const CODEX_EXECUTABLE_VERSION = PACKAGE_VERSIONS.executable;
 export const BUNDLED_PLUGIN_VERSION = "0.1.14" as const;
 
-const PACKAGE_NAME = "@openai/codex-security";
+const PACKAGE_NAME = "opencode-security";
 const VERSION_PATTERN =
   /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/u;
 
@@ -44,7 +44,7 @@ export function updateCommand(
     return `npx ${PACKAGE_NAME}@latest`;
   }
   if (path.includes("/.install/node_modules/")) {
-    return "download and extract the latest Codex Security release";
+    return "download and extract the latest OpenCode Security release";
   }
 
   const global =

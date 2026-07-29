@@ -28,7 +28,7 @@ describe("CLI authentication", () => {
       const deps = dependencies();
       let forwarded: readonly string[] | undefined;
       deps.createSecurity = () => {
-        throw new Error("must not initialize Codex Security");
+        throw new Error("must not initialize OpenCode Security");
       };
       deps.runCodex = async (args) => {
         forwarded = args;
@@ -292,7 +292,7 @@ describe("CLI authentication", () => {
     const stderr = capture();
     const deps = dependencies();
     deps.createSecurity = () => {
-      throw new Error("must not initialize Codex Security");
+      throw new Error("must not initialize OpenCode Security");
     };
 
     expect(
@@ -304,7 +304,7 @@ describe("CLI authentication", () => {
       ),
     ).toBe(2);
     expect(stderr.text()).toContain(
-      "API-key authentication requires OPENAI_API_KEY or CODEX_API_KEY.",
+      "API-key authentication requires OPENCODE_API_KEY, OPENAI_API_KEY, or CODEX_API_KEY.",
     );
     expect(stderr.text()).toContain("--auth chatgpt");
     expect(stderr.text()).not.toContain("must not initialize");

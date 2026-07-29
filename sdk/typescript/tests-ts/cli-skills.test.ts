@@ -88,7 +88,7 @@ describe("CLI skill commands", () => {
           ),
         ).toBe(0);
         expect(help.text()).toContain(
-          `Usage: codex-security ${command} <${argument}>`,
+          `Usage: opencode-security ${command} <${argument}>`,
         );
         expect(help.text()).toContain("--codex <array>");
       }
@@ -273,7 +273,7 @@ describe("CLI skill commands", () => {
           }),
         ),
       ).toBe(2);
-      expect(stderr.text()).toContain("codex-security:");
+      expect(stderr.text()).toContain("opencode-security:");
       expect(started).toBe(false);
     }
   });

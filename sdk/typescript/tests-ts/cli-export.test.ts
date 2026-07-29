@@ -383,7 +383,7 @@ describe("CLI", () => {
       expect(await readFile(outside, "utf8")).toBe("unchanged\n");
       expect((await lstat(output)).isSymbolicLink()).toBe(true);
       expect(stderr.text()).toBe(
-        "codex-security: results.sarif: expected a regular non-symlink file\n",
+        "opencode-security: results.sarif: expected a regular non-symlink file\n",
       );
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -553,7 +553,7 @@ describe("CLI", () => {
         ),
       ).toBe(2);
       expect(stderr.text()).toBe(
-        "codex-security: The export output path cannot traverse a repository symlink.\n",
+        "opencode-security: The export output path cannot traverse a repository symlink.\n",
       );
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -579,7 +579,7 @@ describe("CLI", () => {
     ).toBe(2);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toBe(
-      "codex-security: manifest.scan: SARIF projection requires a sealed scan\n",
+      "opencode-security: manifest.scan: SARIF projection requires a sealed scan\n",
     );
   });
 
@@ -601,7 +601,7 @@ describe("CLI", () => {
     ).toBe(2);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toBe(
-      `codex-security: export failed ${REDACTED_CREDENTIALS}\n`,
+      `opencode-security: export failed ${REDACTED_CREDENTIALS}\n`,
     );
   });
 });

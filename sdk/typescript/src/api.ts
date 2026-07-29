@@ -142,7 +142,7 @@ export type ScanAuthMode = "auto" | "chatgpt" | "api-key";
 export type ScanAuthentication =
   | {
       method: "api_key";
-      source: "OPENAI_API_KEY" | "CODEX_API_KEY";
+      source: "OPENAI_API_KEY" | "CODEX_API_KEY" | "OPENCODE_API_KEY";
       verified: false;
     }
   | {
@@ -1446,7 +1446,7 @@ export function scanAuthentication(
   const key = environmentApiKeyEntry(environment);
   if (auth === "api-key" && key === null) {
     throw new AuthenticationRequiredError(
-      "API-key authentication requires OPENAI_API_KEY or CODEX_API_KEY. " +
+      "API-key authentication requires OPENCODE_API_KEY, OPENAI_API_KEY, or CODEX_API_KEY. " +
         "Set a valid API key or use '--auth chatgpt'.",
     );
   }
@@ -1488,10 +1488,14 @@ function environmentApiKey(environment: ProcessEnvironment): string | null {
 }
 
 function environmentApiKeyEntry(environment: ProcessEnvironment): {
-  source: "OPENAI_API_KEY" | "CODEX_API_KEY";
+  source: "OPENCODE_API_KEY" | "OPENAI_API_KEY" | "CODEX_API_KEY";
   value: string;
 } | null {
-  for (const requested of ["OPENAI_API_KEY", "CODEX_API_KEY"] as const) {
+  for (const requested of [
+    "OPENCODE_API_KEY",
+    "OPENAI_API_KEY",
+    "CODEX_API_KEY",
+  ] as const) {
     const canonical = environment[requested]?.trim();
     if (canonical) return { source: requested, value: canonical };
     for (const [name, value] of Object.entries(environment)) {
@@ -1723,7 +1727,7 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
   return result;
 }
 
-function requireOutputOutsideRepository(
+export function requireOutputOutsideRepository(
   repository: string,
   outputDirectory: string,
   pathKind: ProtectedScanPathKind = "output",

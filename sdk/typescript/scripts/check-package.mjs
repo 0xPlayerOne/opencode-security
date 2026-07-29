@@ -75,7 +75,7 @@ const required = [
   "package/package.json",
   "package/README.md",
   "package/LICENSE",
-  "package/bin/codex-security.mjs",
+  "package/bin/opencode-security.mjs",
   "package/dist/index.js",
   "package/dist/index.d.ts",
   "package/dist/cli.js",
@@ -131,7 +131,7 @@ const allowedRoot = new Set([
   "package/package.json",
   "package/README.md",
   "package/LICENSE",
-  "package/bin/codex-security.mjs",
+  "package/bin/opencode-security.mjs",
 ]);
 const distFiles = new Set(
   [
@@ -147,6 +147,8 @@ const distFiles = new Set(
     "knowledge-base",
     "models",
     "multiscan",
+    "opencode-api",
+    "opencode-runtime",
     "result",
     "runtime",
     "scan-comparison",
@@ -196,7 +198,7 @@ if (
   throw new Error("npm tarball contains an invalid tar entry.");
 }
 const launcherPermissions =
-  listingLines[entries.indexOf("package/bin/codex-security.mjs")]?.split(
+  listingLines[entries.indexOf("package/bin/opencode-security.mjs")]?.split(
     /\s/u,
     1,
   )[0] ?? "";
@@ -207,7 +209,7 @@ const packageJson = JSON.parse(
   tar(["-xOf", archive, "package/package.json"]).toString("utf8"),
 );
 if (
-  packageJson.name !== "@openai/codex-security" ||
+  packageJson.name !== "opencode-security" ||
   packageJson.license !== "Apache-2.0"
 ) {
   throw new Error("npm package does not contain the expected public metadata.");

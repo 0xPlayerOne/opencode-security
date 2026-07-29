@@ -1,4 +1,18 @@
 export { CodexSecurity } from "./api.js";
+export { OpenCodeSecurity } from "./opencode-api.js";
+export type {
+  OpenCodeSecurityConfig,
+  OpenCodeSecurityMetadata,
+} from "./opencode-api.js";
+export {
+  resolveOpenCodeCommand,
+  runOpenCode,
+} from "./opencode-runtime.js";
+export type {
+  OpenCodeRunOptions,
+  OpenCodeRunResult,
+  OpenCodeUsage,
+} from "./opencode-runtime.js";
 export { estimateScanCost } from "./cost.js";
 export type { ScanCost } from "./cost.js";
 export type {

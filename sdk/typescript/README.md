@@ -1,7 +1,7 @@
-# `@openai/codex-security`
+# `opencode-security`
 
-Open-source TypeScript SDK and CLI for running Codex Security scans. The
-ESM-only package includes TypeScript declarations, the `codex-security`
+Open-source TypeScript SDK and CLI for running OpenCode Security scans. The
+ESM-only package includes TypeScript declarations, the `opencode-security`
 executable, and the matching Codex runtime.
 
 > [!NOTE]
@@ -11,8 +11,8 @@ executable, and the matching Codex runtime.
 ## Install
 
 ```bash
-npm install @openai/codex-security
-npx codex-security --version
+npm install opencode-security
+npx opencode-security --version
 ```
 
 The package supports macOS, Linux, and Windows and requires Node.js 22 or
@@ -26,12 +26,12 @@ notice. Notices are also disabled in CI and when stderr is not a terminal.
 
 ## Run a scan from TypeScript
 
-Sign in with `npx codex-security login` or set `OPENAI_API_KEY` or
+Sign in with `npx opencode-security login` or set `OPENAI_API_KEY` or
 `CODEX_API_KEY`. Then create a client and scan a repository you own or have
 permission to assess:
 
 ```ts
-import { CodexSecurity } from "@openai/codex-security";
+import { CodexSecurity } from "opencode-security";
 
 const security = new CodexSecurity();
 
@@ -61,34 +61,34 @@ limit access to authorized reviewers.
 For local use, sign in with ChatGPT:
 
 ```bash
-npx codex-security login
-npx codex-security scan .
+npx opencode-security login
+npx opencode-security scan .
 ```
 
 On a remote or headless machine, use device authentication:
 
 ```bash
-npx codex-security login --device-auth
+npx opencode-security login --device-auth
 ```
 
 For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY`. To store an API key instead,
 pass it on stdin:
 
 ```bash
-printenv OPENAI_API_KEY | npx codex-security login --with-api-key
+printenv OPENAI_API_KEY | npx opencode-security login --with-api-key
 ```
 
 On Windows, set the API key in PowerShell:
 
 ```powershell
 $env:OPENAI_API_KEY = "<your-api-key>"
-npx codex-security scan C:\code\repository
+npx opencode-security scan C:\code\repository
 ```
 
-Check or remove the stored sign-in with `npx codex-security login status` and
-`npx codex-security logout`. Codex Security reuses an existing file-based Codex
+Check or remove the stored sign-in with `npx opencode-security login status` and
+`npx opencode-security logout`. OpenCode Security reuses an existing file-based Codex
 sign-in. If Codex stores credentials in the system keyring, run
-`npx codex-security login` once before scanning.
+`npx opencode-security login` once before scanning.
 
 An environment API key takes precedence over a stored sign-in by default.
 When both a stored ChatGPT sign-in and an environment API key are available, an
@@ -97,8 +97,8 @@ other noninteractive scans never prompt and retain automatic API-key
 precedence. Select the credential source explicitly with `--auth`:
 
 ```bash
-npx codex-security scan . --auth chatgpt
-npx codex-security scan . --auth api-key
+npx opencode-security scan . --auth chatgpt
+npx opencode-security scan . --auth api-key
 ```
 
 `--auth chatgpt` uses the stored sign-in and ignores `OPENAI_API_KEY` and
@@ -118,42 +118,42 @@ unset OPENAI_API_KEY CODEX_API_KEY
 The interactive choice applies only to the current scan and is not persisted.
 
 When an environment key is configured, ChatGPT login and
-`codex-security login status` identify the effective scan credential source
+`opencode-security login status` identify the effective scan credential source
 without printing its value, including when no stored sign-in exists.
 
 ## CLI
 
 ```bash
-npx codex-security scan /path/to/repository
-npx codex-security scan /path/to/repository --model gpt-5.6-terra
-npx codex-security scan /path/to/repository --path src --path tests
-npx codex-security scan /path/to/repository --knowledge-base /path/to/threat-models --knowledge-base /path/to/architecture.pdf
-npx codex-security scan /path/to/repository --diff origin/main --json
-npx codex-security scan /path/to/repository --output-dir /path/outside/repository/results
-npx codex-security scan /path/to/repository --output-dir /path/outside/repository/results --archive-existing
-npx codex-security scan /path/to/repository --dry-run
-npx codex-security scan /path/to/repository --fail-on-severity high
-npx codex-security scan /path/to/repository --max-cost 5
-npx codex-security install-hook
-npx codex-security bulk-scan
-npx codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --workers 4
-npx codex-security scans list /path/to/repository
-npx codex-security scans list --scan-root /path/outside/repository/results
-npx codex-security scans show SCAN_ID
-npx codex-security scans rerun SCAN_ID
-npx codex-security scans match PREVIOUS_SCAN_ID CURRENT_SCAN_ID
-npx codex-security scans match --all
-npx codex-security scans compare PREVIOUS_SCAN_ID CURRENT_SCAN_ID
-npx codex-security findings false-positive OCCURRENCE_ID --reason "The route already checks permissions"
-npx codex-security export /path/outside/repository/results --export-format sarif --output /path/outside/repository/results.sarif
-npx codex-security export /path/outside/repository/results --export-format csv --output /path/outside/repository/findings.csv
-npx codex-security export /path/outside/repository/results --export-format json --output /path/outside/repository/findings.json
-npx codex-security validate /path/outside/repository/findings.json "Possible SQL injection in src/query.ts:42"
-npx codex-security patch /path/outside/repository/findings.json "Missing authorization check in src/routes.ts:18"
+npx opencode-security scan /path/to/repository
+npx opencode-security scan /path/to/repository --model gpt-5.6-terra
+npx opencode-security scan /path/to/repository --path src --path tests
+npx opencode-security scan /path/to/repository --knowledge-base /path/to/threat-models --knowledge-base /path/to/architecture.pdf
+npx opencode-security scan /path/to/repository --diff origin/main --json
+npx opencode-security scan /path/to/repository --output-dir /path/outside/repository/results
+npx opencode-security scan /path/to/repository --output-dir /path/outside/repository/results --archive-existing
+npx opencode-security scan /path/to/repository --dry-run
+npx opencode-security scan /path/to/repository --fail-on-severity high
+npx opencode-security scan /path/to/repository --max-cost 5
+npx opencode-security install-hook
+npx opencode-security bulk-scan
+npx opencode-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --workers 4
+npx opencode-security scans list /path/to/repository
+npx opencode-security scans list --scan-root /path/outside/repository/results
+npx opencode-security scans show SCAN_ID
+npx opencode-security scans rerun SCAN_ID
+npx opencode-security scans match PREVIOUS_SCAN_ID CURRENT_SCAN_ID
+npx opencode-security scans match --all
+npx opencode-security scans compare PREVIOUS_SCAN_ID CURRENT_SCAN_ID
+npx opencode-security findings false-positive OCCURRENCE_ID --reason "The route already checks permissions"
+npx opencode-security export /path/outside/repository/results --export-format sarif --output /path/outside/repository/results.sarif
+npx opencode-security export /path/outside/repository/results --export-format csv --output /path/outside/repository/findings.csv
+npx opencode-security export /path/outside/repository/results --export-format json --output /path/outside/repository/findings.json
+npx opencode-security validate /path/outside/repository/findings.json "Possible SQL injection in src/query.ts:42"
+npx opencode-security patch /path/outside/repository/findings.json "Missing authorization check in src/routes.ts:18"
 ```
 
-Run `npx codex-security --version` for the installed CLI version or
-`npx codex-security info --json` for the package, bundled plugin, Codex runtime,
+Run `npx opencode-security --version` for the installed CLI version or
+`npx opencode-security info --json` for the package, bundled plugin, Codex runtime,
 default model, reasoning effort, and first-scan command. A scan with `--dry-run`
 also reports its effective model and reasoning effort, including `--codex`
 overrides, without starting Codex or contacting the network.
@@ -208,10 +208,10 @@ Use `--max-cost USD` to stop a scan, including its delegated workers, when its
 running cost exceeds the limit. Partial results are preserved. Requests
 already in progress can finish above the limit.
 
-Run `npx codex-security scan --help` or `npx codex-security bulk-scan --help`
+Run `npx opencode-security scan --help` or `npx opencode-security bulk-scan --help`
 for the complete CLI references.
 
-Sign in with `gh auth login`, then run `npx codex-security bulk-scan` to discover
+Sign in with `gh auth login`, then run `npx opencode-security bulk-scan` to discover
 GitHub repositories pushed in the last 90 days. Archived
 repositories and forks are excluded. Search the repository list, select the
 repositories to scan, and confirm before scanning.
@@ -233,7 +233,7 @@ Results remain under `--output-dir`; rerun the same command to resume.
 
 ### Scan history and reruns
 
-`npx codex-security scans list` lists scans for the current repository. Pass a
+`npx opencode-security scans list` lists scans for the current repository. Pass a
 repository path to inspect another checkout, `--scan-root DIR` to list scans
 whose artifacts are under a particular root. `scans show SCAN_ID` includes the
 scan configuration, results, coverage, and artifact locations.
@@ -241,8 +241,8 @@ scan configuration, results, coverage, and artifact locations.
 Every scan history command accepts a full scan ID or a unique prefix of at
 least eight characters.
 
-Scan history uses the existing Codex Security workbench database at
-`$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`. Set
+Scan history uses the existing OpenCode Security workbench database at
+`$CODEX_HOME/state/plugins/opencode-security/workbench.sqlite3`. Set
 `CODEX_SECURITY_STATE_DIR` to place the database elsewhere. Scan credentials
 are never stored in the scan configuration.
 
@@ -251,7 +251,7 @@ maintain its database and journal files. If the host itself cannot write to the
 default directory, select a writable directory outside the scanned repository:
 
 ```bash
-export CODEX_SECURITY_STATE_DIR=/path/to/writable/codex-security-state
+export CODEX_SECURITY_STATE_DIR=/path/to/writable/opencode-security-state
 ```
 
 Use `findings false-positive OCCURRENCE_ID --reason TEXT` to mark a finding as
@@ -288,7 +288,7 @@ nonzero:
 
 ```bash
 SCAN_ROOT="$(mktemp -d)"
-npx codex-security scan . \
+npx opencode-security scan . \
   --diff origin/main \
   --output-dir "$SCAN_ROOT/results" \
   --json \
@@ -306,7 +306,7 @@ document. CSV uses the portable findings columns, marks findings as open, and
 does not include local workbench triage state. The exporter validates the seal
 before writing, accepts `--output -` for stdout, and can use
 `--source-root /path/to/repository` with SARIF to add source-line fingerprints.
-Run `npx codex-security export --help` for all export options.
+Run `npx opencode-security export --help` for all export options.
 
 Use `validate` to run the bundled validation skill on candidate findings and
 `patch` to run the bundled fix-finding skill on security issues. Each positional
@@ -343,7 +343,7 @@ authorization failures stop immediately.
 
 - [CLI quickstart](https://developers.openai.com/codex/security/cli)
 - [TypeScript SDK guide](https://developers.openai.com/codex/security/sdk)
-- [GitHub issues](https://github.com/openai/codex-security/issues) for bugs and
+- [GitHub issues](https://github.com/openai/opencode-security/issues) for bugs and
   feature requests
-- [Security policy](https://github.com/openai/codex-security/blob/main/SECURITY.md)
+- [Security policy](https://github.com/openai/opencode-security/blob/main/SECURITY.md)
   for private vulnerability reporting and safe operation

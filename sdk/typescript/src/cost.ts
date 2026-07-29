@@ -48,6 +48,8 @@ interface ScanCostSnapshot {
 }
 
 const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
+  // OpenCode Go DeepSeek V4 Flash: $0.14/M input and $0.28/M output.
+  "opencode-go/deepseek-v4-flash": [140, 140, 140, 280],
   "gpt-5.6": [5_000, 500, 6_250, 30_000],
   "gpt-5.6-sol": [5_000, 500, 6_250, 30_000],
   "gpt-5.6-terra": [2_500, 250, 3_125, 15_000],
