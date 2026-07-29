@@ -1,4 +1,4 @@
-name: node-release
+name: OpenCode Security / NPM Release
 
 on:
   push:
@@ -11,16 +11,10 @@ concurrency:
 
 jobs:
   verify:
-    if: github.repository == 'openai/codex-security'
     name: verify
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    env:
-      NPM_CONFIG_REGISTRY: https://openai.firewall.socket.dev/npm/
-      PNPM_CONFIG_REGISTRY: https://openai.firewall.socket.dev/npm/
-      COREPACK_NPM_REGISTRY: https://openai.firewall.socket.dev/npm/
-      BUN_CONFIG_REGISTRY: https://openai.firewall.socket.dev/npm/
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
 
@@ -31,37 +25,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Set up Socket Firewall
-        uses: SocketDev/action@937f824ec476dfd164d4a4d9995751427b0be143 # v1
-        with:
-          mode: firewall-free
-          firewall-version: "1.15.0"
-
       - name: Set up Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
           node-version: "22"
           package-manager-cache: false
-
-      - name: Activate Socket Firewall
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          npm_registry="https://openai.firewall.socket.dev/npm/"
-          pypi_registry="https://openai.firewall.socket.dev/pypi/simple/"
-          {
-            printf 'NPM_CONFIG_REGISTRY=%s\n' "$npm_registry"
-            printf 'npm_config_registry=%s\n' "$npm_registry"
-            printf 'PNPM_CONFIG_REGISTRY=%s\n' "$npm_registry"
-            printf 'pnpm_config_registry=%s\n' "$npm_registry"
-            printf 'COREPACK_NPM_REGISTRY=%s\n' "$npm_registry"
-            printf 'YARN_NPM_REGISTRY_SERVER=%s\n' "$npm_registry"
-            printf 'BUN_CONFIG_REGISTRY=%s\n' "$npm_registry"
-            printf 'UV_DEFAULT_INDEX=%s\n' "$pypi_registry"
-            printf 'UV_INDEX_URL=%s\n' "$pypi_registry"
-            printf 'PIP_INDEX_URL=%s\n' "$pypi_registry"
-          } >> "$GITHUB_ENV"
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
@@ -70,7 +38,7 @@ jobs:
 
       - name: Enable pnpm
         shell: bash
-        run: corepack enable && corepack prepare "$(node -p 'require("./sdk/typescript/package.json").packageManager')" --activate
+        run: corepack enable pnpm && corepack prepare pnpm@11.13.1 --activate
 
       - name: Validate release tag
         id: release
@@ -78,7 +46,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ ! "$GITHUB_REF_NAME" =~ ^npm-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "npm release tags must identify a stable release, such as npm-v0.1.0." >&2
+            echo "npm release tags must identify a stable release, such as npm-v0.1.1." >&2
             exit 1
           fi
           version="${GITHUB_REF_NAME#npm-v}"
@@ -95,7 +63,8 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Install dependencies
-        run: sfw pnpm --dir sdk/typescript install --frozen-lockfile
+        working-directory: sdk/typescript
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Verify
         run: |
@@ -119,11 +88,11 @@ jobs:
           set -euo pipefail
           consumer="$(mktemp -d)"
           trap 'rm -rf "$consumer"' EXIT
-          printf '%s\n' '{"name":"codex-security-smoke","private":true,"type":"module"}' > "$consumer/package.json"
-          sfw npm install --ignore-scripts --prefix "$consumer" --include=optional --no-audit --no-fund ./dist/*.tgz
-          (cd "$consumer" && node --input-type=module --eval 'const sdk = await import("@openai/codex-security"); if (typeof sdk.CodexSecurity !== "function") process.exit(1);')
-          "$consumer/node_modules/.bin/codex-security" --version
-          "$consumer/node_modules/.bin/codex-security" --help
+          printf '%s\n' '{"name":"opencode-security-smoke","private":true,"type":"module"}' > "$consumer/package.json"
+          npm install --ignore-scripts --prefix "$consumer" --include=optional --no-audit --no-fund ./dist/*.tgz
+          (cd "$consumer" && node --input-type=module --eval 'const sdk = await import("opencode-security"); if (typeof sdk.OpenCodeSecurity !== "function") process.exit(1);')
+          "$consumer/node_modules/.bin/opencode-security" --version
+          "$consumer/node_modules/.bin/opencode-security" --help
 
       - name: Upload verified package
         id: upload
@@ -136,7 +105,6 @@ jobs:
           compression-level: 0
 
   publish:
-    if: github.repository == 'openai/codex-security'
     name: publish
     needs: verify
     runs-on: ubuntu-latest
@@ -184,18 +152,18 @@ jobs:
           digest-mismatch: error
 
       - name: Publish initial npm release
-        if: github.ref_name == 'npm-v0.1.0'
+        if: github.ref_name == 'npm-v0.1.1'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_FIRST_PUBLISH_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
           if [[ -z "${NODE_AUTH_TOKEN:-}" ]]; then
-            echo "Security Products must configure NPM_FIRST_PUBLISH_TOKEN in the protected npm environment before the initial release." >&2
+            echo "Configure NPM_FIRST_PUBLISH_TOKEN in the protected npm environment before the initial release." >&2
             exit 1
           fi
           npm publish ./dist/*.tgz --provenance --access public --tag latest
 
       - name: Publish to npm using trusted publishing
-        if: github.ref_name != 'npm-v0.1.0'
+        if: github.ref_name != 'npm-v0.1.1'
         run: npm publish ./dist/*.tgz --provenance --access public --tag latest

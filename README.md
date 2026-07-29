@@ -1,51 +1,37 @@
-# Codex Security
+# OpenCode Security
 
-`@openai/codex-security` is a CLI and TypeScript SDK for finding, validating, and fixing security vulnerabilities in your code. Scan repositories, review changes, track findings over time, and run security checks in CI.
+`opencode-security` is an opt-in CLI and TypeScript SDK for finding, validating, and fixing security vulnerabilities in your code with OpenCode-compatible models. It preserves the upstream artifact contract while using the OpenCode runtime.
 
-**[Documentation](http://learn.chatgpt.com/docs/security/cli)**
+The default model is `opencode-go/deepseek-v4-flash`. Set `OPENCODE_API_KEY` before running a scan.
 
 ## Quick start
 
 Requires Node.js 22 or later, Python 3.10 or later, and access to Codex Security.
 
 ```bash
-npm install @openai/codex-security
-npx codex-security login
-npx codex-security scan .
+npm install opencode-security
+npx opencode-security scan . --model opencode-go/deepseek-v4-flash
 ```
 
-For CI, set `OPENAI_API_KEY` instead of signing in.
-
-If both a ChatGPT sign-in and an API key are available, interactive scans ask
-which credential to use. CI and other noninteractive scans keep the existing
-API-key precedence. Select a credential explicitly when needed:
-
-```bash
-npx codex-security scan . --auth chatgpt
-npx codex-security scan . --auth api-key
-```
-
-To make your ChatGPT sign-in the automatic default, unset any configured API
-keys:
-
-```bash
-unset OPENAI_API_KEY CODEX_API_KEY
-```
-
-Scan history is stored in the Codex Security workbench state directory. If that
-directory cannot be written, set `CODEX_SECURITY_STATE_DIR` to a writable
-directory outside the repository.
+For CI, store `OPENCODE_API_KEY` as an encrypted repository or environment
+secret. The package does not run automatically; consumers must explicitly call
+the reusable workflow from `.github/workflows/opencode-security.yml`.
 
 ## TypeScript SDK
 
 ```ts
-import { CodexSecurity } from "@openai/codex-security";
+import { OpenCodeSecurity } from "opencode-security";
 
-const security = new CodexSecurity();
+const security = new OpenCodeSecurity({
+  model: "opencode-go/deepseek-v4-flash",
+  maxCostUsd: 1,
+});
 const result = await security.run(".");
 
 console.log(result.reportPath);
 await security.close();
 ```
 
-For installation, authentication, scan options, and CI setup, see the [official documentation](http://learn.chatgpt.com/docs/security/cli).
+The default reusable workflow is available at
+`.github/workflows/opencode-security.yml` in this repository. Pin
+`source_ref` to a release tag or commit when adopting it in another repository.
