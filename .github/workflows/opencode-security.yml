@@ -69,6 +69,10 @@ jobs:
           path: .opencode-security
           persist-credentials: false
 
+      - name: Isolate scanner
+        shell: bash
+        run: mv .opencode-security "$RUNNER_TEMP/opencode-security"
+
       - name: Set up Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
@@ -80,12 +84,10 @@ jobs:
         run: corepack enable pnpm && corepack prepare pnpm@11.13.1 --activate
 
       - name: Install scanner
-        working-directory: .opencode-security/sdk/typescript
-        run: pnpm install --frozen-lockfile --ignore-scripts
+        run: cd "$RUNNER_TEMP/opencode-security/sdk/typescript" && pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Build scanner
-        working-directory: .opencode-security/sdk/typescript
-        run: pnpm run build
+        run: cd "$RUNNER_TEMP/opencode-security/sdk/typescript" && pnpm run build
 
       - name: Run scan
         shell: bash
@@ -109,7 +111,7 @@ jobs:
           if [[ "$FAIL_ON_SEVERITY" != "none" ]]; then
             args+=(--fail-on-severity "$FAIL_ON_SEVERITY")
           fi
-          node .opencode-security/sdk/typescript/dist/cli.js scan "${args[@]}"
+          node "$RUNNER_TEMP/opencode-security/sdk/typescript/dist/cli.js" scan "${args[@]}"
 
       - name: Upload scan results
         if: always()
