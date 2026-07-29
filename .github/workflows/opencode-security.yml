@@ -1,0 +1,118 @@
+name: OpenCode Security / Scan
+
+on:
+  workflow_call:
+    inputs:
+      source_ref:
+        description: OpenCode Security ref to run.
+        required: false
+        type: string
+        default: main
+      runner:
+        description: Runner for the scan.
+        required: false
+        type: string
+        default: ubuntu-latest
+      model:
+        description: OpenCode model reference.
+        required: false
+        type: string
+        default: opencode-go/deepseek-v4-flash
+      mode:
+        description: Scan depth.
+        required: false
+        type: string
+        default: standard
+      fail_on_severity:
+        description: Highest finding severity that fails the job, or none.
+        required: false
+        type: string
+        default: high
+      max_cost_usd:
+        description: Maximum allowed spend for one scan.
+        required: false
+        type: number
+        default: 1
+    secrets:
+      OPENCODE_API_KEY:
+        description: OpenCode API key used only for this opt-in scan.
+        required: true
+
+concurrency:
+  group: opencode-security-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Scan
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 30
+    env:
+      OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+      OPENCODE_DISABLE_CLAUDE_CODE: "1"
+      OPENCODE_SECURITY_SOURCE: ${{ inputs.source_ref }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Checkout scanner
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: 0xPlayerOne/opencode-security
+          ref: ${{ inputs.source_ref }}
+          path: .opencode-security
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: "22"
+          package-manager-cache: false
+
+      - name: Enable pnpm
+        shell: bash
+        run: corepack enable && corepack prepare "$(node -p 'require("./.opencode-security/sdk/typescript/package.json").packageManager')" --activate
+
+      - name: Install scanner
+        run: pnpm --dir .opencode-security/sdk/typescript install --frozen-lockfile --ignore-scripts
+
+      - name: Build scanner
+        run: pnpm --dir .opencode-security/sdk/typescript run build
+
+      - name: Run scan
+        shell: bash
+        env:
+          MODEL: ${{ inputs.model }}
+          MODE: ${{ inputs.mode }}
+          MAX_COST_USD: ${{ inputs.max_cost_usd }}
+          FAIL_ON_SEVERITY: ${{ inputs.fail_on_severity }}
+        run: |
+          set -euo pipefail
+          output_dir="$RUNNER_TEMP/opencode-security-results"
+          mkdir -p "$output_dir"
+          args=(
+            "$GITHUB_WORKSPACE"
+            --model "$MODEL"
+            --mode "$MODE"
+            --output-dir "$output_dir"
+            --max-cost "$MAX_COST_USD"
+          )
+          if [[ "$FAIL_ON_SEVERITY" != "none" ]]; then
+            args+=(--fail-on-severity "$FAIL_ON_SEVERITY")
+          fi
+          node .opencode-security/sdk/typescript/dist/cli.js scan "${args[@]}"
+
+      - name: Upload scan results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: opencode-security-results
+          path: ${{ runner.temp }}/opencode-security-results
+          if-no-files-found: ignore
+          retention-days: 14
