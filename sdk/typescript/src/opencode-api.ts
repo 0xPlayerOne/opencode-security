@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
@@ -149,10 +149,16 @@ export class OpenCodeSecurity {
     const temporaryRoot = await realpath(
       await mkdtemp(join(tmpdir(), "opencode-security-runtime-")),
     );
-    const pluginRoot = await resolvePluginPath(
+    const sourcePluginRoot = await resolvePluginPath(
       this.config.pluginPath,
       temporaryRoot,
     );
+    const pluginRoot = join(temporaryRoot, "plugin");
+    await cp(sourcePluginRoot, pluginRoot, {
+      recursive: true,
+      errorOnExist: true,
+      force: false,
+    });
     const plugin = await pluginMetadata(pluginRoot);
     const python = await resolvePluginPython({
       configuredPath: this.config.pythonPath,
