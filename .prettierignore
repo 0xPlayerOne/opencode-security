@@ -1,0 +1,5 @@
+# Generated release metadata is intentionally managed by Release Please.
+CHANGELOG.md
+
+# Runtime files are checked out under .github during CI.
+.github/.code-foundry

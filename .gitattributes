@@ -1,9 +1,9 @@
-*.cjs text eol=lf
-*.js text eol=lf
-*.json text eol=lf
-*.md text eol=lf
-*.mjs text eol=lf
-*.sh text eol=lf
-*.ts text eol=lf
-*.yaml text eol=lf
-*.yml text eol=lf
+# Normalize text files to LF and keep binary assets untouched.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
