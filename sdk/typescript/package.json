@@ -52,7 +52,7 @@
   },
   "dependencies": {
     "@inquirer/prompts": "8.5.2",
-    "@octokit/core": "7.0.6",
+    "@octokit/core": "7.0.7",
     "@openai/codex": "0.146.0",
     "@openai/codex-sdk": "0.146.0",
     "ajv": "8.20.0",
@@ -60,7 +60,7 @@
     "fast-uri": "4.1.2",
     "fflate": "0.8.3",
     "incur": "0.4.26",
-    "opencode-ai": "1.18.10",
+    "opencode-ai": "1.18.11",
     "papaparse": "5.5.4",
     "pdfjs-dist": "6.2.108",
     "smol-toml": "1.7.1"
