@@ -38,7 +38,7 @@ jobs:
 
       - name: Enable pnpm
         shell: bash
-        run: corepack enable pnpm && corepack prepare pnpm@11.13.1 --activate
+        run: corepack enable pnpm && corepack prepare "$(node -p 'require(\"./sdk/typescript/package.json\").packageManager')" --activate
 
       - name: Validate release tag
         id: release
