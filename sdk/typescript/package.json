@@ -47,6 +47,9 @@
     "generate:models:check": "node scripts/generate-models.cjs --check",
     "lint": "tsc --noEmit",
     "test": "bun test --timeout 30000 ./tests-ts",
+    "test:unit": "bun run test:coverage",
+    "test:coverage": "bun test --coverage --timeout 30000 ./tests-ts",
+    "test:smoke": "pnpm run test:package",
     "test:package": "node scripts/smoke-package.mjs",
     "types": "pnpm run generate:models:check && tsc --noEmit"
   },
