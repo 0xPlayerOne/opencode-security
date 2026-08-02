@@ -141,15 +141,14 @@ function decodeText(path: string, bytes: Uint8Array): string {
 
 async function extractPdf(path: string, bytes: Uint8Array): Promise<string> {
   try {
-    const { getDocument, VerbosityLevel } = await import(
-      "pdfjs-dist/legacy/build/pdf.mjs"
-    );
-    const document = await getDocument({
+    const { getDocument, VerbosityLevel } =
+      await import("pdfjs-dist/legacy/build/pdf.mjs");
+    const loadingTask = getDocument({
       data: new Uint8Array(bytes),
-      isEvalSupported: false,
       stopAtErrors: true,
       verbosity: VerbosityLevel.ERRORS,
-    }).promise;
+    });
+    const document = await loadingTask.promise;
     try {
       const pages: string[] = [];
       for (let number = 1; number <= document.numPages; number++) {
@@ -162,7 +161,7 @@ async function extractPdf(path: string, bytes: Uint8Array): Promise<string> {
       }
       return pages.join("\n");
     } finally {
-      await document.destroy();
+      await loadingTask.destroy();
     }
   } catch (error) {
     throw new Error(`Cannot extract text from knowledge base PDF: ${path}`, {

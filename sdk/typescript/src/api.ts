@@ -177,8 +177,10 @@ export interface ScanPreflight {
   maxCostUsd?: number;
 }
 
-interface LocalScanInputs
-  extends Omit<ScanPreflight, "model" | "reasoningEffort" | "authentication"> {
+interface LocalScanInputs extends Omit<
+  ScanPreflight,
+  "model" | "reasoningEffort" | "authentication"
+> {
   protectedRoot: string;
 }
 
@@ -1473,8 +1475,7 @@ function notifyObserver<Arguments extends unknown[]>(
   observerName: ScanObserverName,
   observer: ((...args: Arguments) => void) | undefined,
   onObserverError:
-    | ((observer: ScanObserverName, error: unknown) => void)
-    | undefined,
+    ((observer: ScanObserverName, error: unknown) => void) | undefined,
   ...args: Arguments
 ): void {
   void Promise.resolve()

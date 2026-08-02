@@ -320,7 +320,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
         new Promise<number>((resolve, reject) => {
           invocation.once("error", reject);
           invocation.once("close", (code, signal) =>
-            resolve(signal === null ? code ?? 1 : 1),
+            resolve(signal === null ? (code ?? 1) : 1),
           );
         }),
         forwarded,
@@ -408,7 +408,7 @@ export async function runCodexSkillCommand(
                 ? 130
                 : requestedSignal === "SIGTERM" || signal === "SIGTERM"
                   ? 143
-                  : code ?? 1,
+                  : (code ?? 1),
             );
           },
         );
@@ -843,6 +843,7 @@ export async function main(
       command: "npx --yes opencode-security --mcp",
       instructions:
         "Use info for read-only SDK metadata. Scans and other state-changing commands are CLI-only because the MCP transport cannot cancel active commands.",
+      tools: { discovery: "direct" },
     },
   })
     .command("scan", {
@@ -1597,7 +1598,7 @@ function scanArgumentsFromRecipe(
     knowledgeBasePaths,
     diff: kind === "refs" ? reference : undefined,
     workingTree: kind === "working_tree",
-    head: kind === "refs" ? head ?? "HEAD" : undefined,
+    head: kind === "refs" ? (head ?? "HEAD") : undefined,
     base: kind === "working_tree" ? reference : undefined,
     mode,
     archiveExisting: false,
@@ -2512,7 +2513,7 @@ function scanScope(arguments_: ScanArguments): string | null {
         isAbsolute(path) ||
         /^[A-Za-z]:\//u.test(portable) ||
         portable.startsWith("//")
-          ? portable.split("/").at(-1) ?? portable
+          ? (portable.split("/").at(-1) ?? portable)
           : portable;
       return cliErrorMessage(scoped.replaceAll(/[\u0000-\u001F\u007F]/gu, " "));
     });
@@ -2562,7 +2563,7 @@ function printScanSummary(
     Number.isFinite(completed) &&
     completed >= started
       ? Math.floor((completed - started) / 1_000)
-      : progress?.elapsedSeconds ?? 0;
+      : (progress?.elapsedSeconds ?? 0);
   errorOutput.write(
     `opencode-security: Elapsed: ${elapsed}s.${workers === null ? "" : ` Workers: ${workers.started}/${workers.planned}.`}\n`,
   );
