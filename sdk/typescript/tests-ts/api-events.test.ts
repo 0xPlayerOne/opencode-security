@@ -214,6 +214,7 @@ describe("one-shot scan events", () => {
           usage: {
             input_tokens: 1,
             cached_input_tokens: 0,
+            cache_write_input_tokens: 0,
             output_tokens: 1,
             reasoning_output_tokens: 0,
           },
@@ -279,6 +280,7 @@ describe("one-shot scan events", () => {
           usage: {
             input_tokens: 10,
             cached_input_tokens: 2,
+            cache_write_input_tokens: 0,
             output_tokens: 3,
             reasoning_output_tokens: 1,
           },
@@ -528,6 +530,7 @@ describe("one-shot scan events", () => {
         usage: {
           input_tokens: 10,
           cached_input_tokens: 2,
+          cache_write_input_tokens: 0,
           output_tokens: 3,
           reasoning_output_tokens: 1,
         },

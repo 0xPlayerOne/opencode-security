@@ -81,10 +81,7 @@ export class DiffTarget {
 
 export type ScanTarget = "repository" | DiffTarget | readonly string[];
 export type NormalizedTargetKind =
-  | "repository"
-  | "paths"
-  | "refs"
-  | "working_tree";
+  "repository" | "paths" | "refs" | "working_tree";
 
 export interface NormalizedTarget {
   kind: NormalizedTargetKind;

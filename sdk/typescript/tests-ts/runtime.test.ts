@@ -568,7 +568,7 @@ describe("plugin runtime preparation", () => {
       }),
     );
     let replacements = 0;
-    for (let offset = archive.indexOf("release/x.txt"); offset >= 0; ) {
+    for (let offset = archive.indexOf("release/x.txt"); offset >= 0;) {
       archive[offset + "release/".length] = 0x82;
       replacements += 1;
       offset = archive.indexOf("release/x.txt", offset + 1);
