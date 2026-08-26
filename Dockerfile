@@ -4,17 +4,18 @@ FROM node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca440
 
 WORKDIR /build/sdk/typescript
 
-COPY sdk/typescript/package.json sdk/typescript/pnpm-lock.yaml ./
+RUN npm install --global bun@1.4.0 \
+    && npm cache clean --force
 
-RUN corepack enable \
-    && corepack prepare "$(node --print 'require("./package.json").packageManager')" --activate \
-    && pnpm install --frozen-lockfile --ignore-scripts
+COPY sdk/typescript/package.json sdk/typescript/bun.lock ./
+
+RUN bun install --frozen-lockfile --ignore-scripts
 
 COPY sdk/typescript/ ./
 
-RUN pnpm run types \
-    && pnpm run build \
-    && pnpm pack --pack-destination /build/package \
+RUN bun run types \
+    && bun run build \
+    && bun pm pack --destination /build/package \
     && node scripts/check-package.mjs /build/package/*.tgz
 
 FROM node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3
