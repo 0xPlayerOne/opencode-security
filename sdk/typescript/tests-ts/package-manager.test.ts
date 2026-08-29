@@ -21,4 +21,13 @@ describe("package manager configuration", () => {
       expect(await readFile(filePath, "utf8")).not.toMatch(/\bpnpm\b/i);
     }
   });
+
+  test("runs the required node matrix for staging and main pull requests", async () => {
+    const workflow = await readFile(
+      resolve(repositoryRoot, ".github/workflows/node-ci.yml"),
+      "utf8",
+    );
+
+    expect(workflow).toMatch(/pull_request:\n\s+branches: \[main, staging\]/);
+  });
 });
