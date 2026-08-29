@@ -2019,7 +2019,15 @@ def _prepare_scan_finalization(
     schema_dir = schema_dir or Path(__file__).resolve().parent.parent / "schemas"
     manifest = _read_scan_local_json(scan_dir, "scan-manifest.json", "scan-manifest.json")
     scan = _require_dict(manifest, "scan", "manifest")
-    was_sealed = scan.get("sealedAt") is not None or scan.get("artifacts") is not None
+    has_seal = scan.get("sealedAt") is not None or scan.get("artifacts") is not None
+    # A completion binding means the workbench still owns this running scan.
+    # Any model-authored seal is provisional and must not bypass authoritative
+    # metadata population or artifact re-sealing. Completed scans are loaded
+    # without a binding and retain strict immutable-seal validation.
+    was_sealed = has_seal and completion_binding is None
+    if has_seal and completion_binding is not None:
+        scan.pop("sealedAt", None)
+        scan.pop("artifacts", None)
     if not was_sealed:
         _populate_unsealed_manifest_envelope(manifest, scan, completion_binding)
     _validate_contract_refs(scan)
