@@ -1,6 +1,7 @@
 import { existsSync, renameSync, symlinkSync } from "node:fs";
 import {
   chmod,
+  cp,
   copyFile,
   lstat,
   mkdir,
@@ -880,6 +881,51 @@ describe("runtime directories and plugin Python boundary", () => {
       kind: "git_revision",
       revision: "abc123",
       targetId: "target-1",
+    });
+  });
+
+  test("re-seals a model-finalized running scan with authoritative workbench metadata", async () => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const pluginRoot = await bundledPluginRoot();
+    const finalizer = join(pluginRoot, "scripts", "finalize_scan_contract.py");
+    const root = await temporaryDirectory();
+    const scanDir = join(root, "scan");
+    await cp(join(pluginRoot, "examples", "completed-scan"), scanDir, {
+      recursive: true,
+    });
+    const result = Bun.spawnSync([
+      python!,
+      "-I",
+      "-B",
+      "-c",
+      [
+        "import json, pathlib, runpy, sys",
+        "module = runpy.run_path(sys.argv[1])",
+        "binding = {'scanId': 'scan_example_001', 'startedAt': '2026-06-01T00:00:00Z', 'completedAt': '2026-06-01T00:01:00Z', 'producer': {'name': 'opencode-security-plugin', 'version': '1.2.3'}, 'target': {'targetId': 'target_sha256_example', 'displayName': 'example/repo', 'revision': 'deadbeef'}, 'allowedTargetKinds': ['git_revision'], 'scope': {'includePaths': ['src/'], 'excludePaths': []}, 'coverageMode': 'repository'}",
+        "prepared = module['_prepare_scan_finalization'](pathlib.Path(sys.argv[2]), completion_binding=binding)",
+        "manifest = prepared[2]",
+        "print(json.dumps({'wasSealed': prepared[5], 'startedAt': manifest['scan']['startedAt'], 'completedAt': manifest['scan']['completedAt'], 'sealedAt': manifest['scan']['sealedAt'], 'producer': manifest['scan']['producer'], 'target': manifest['scan']['target']}, sort_keys=True))",
+      ].join("\n"),
+      finalizer,
+      scanDir,
+    ]);
+
+    expect(result.exitCode).toBe(0);
+    expect(new TextDecoder().decode(result.stderr)).toBe("");
+    expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
+      wasSealed: false,
+      startedAt: "2026-06-01T00:00:00Z",
+      completedAt: "2026-06-01T00:01:00Z",
+      sealedAt: "2026-06-01T00:01:00Z",
+      producer: { name: "opencode-security-plugin", version: "1.2.3" },
+      target: {
+        displayName: "example/repo",
+        kind: "git_revision",
+        remote: "https://github.com/example/repo",
+        revision: "deadbeef",
+        targetId: "target_sha256_example",
+      },
     });
   });
 
