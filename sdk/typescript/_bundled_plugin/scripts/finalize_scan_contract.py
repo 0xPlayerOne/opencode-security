@@ -812,6 +812,9 @@ def _populate_unsealed_manifest_envelope(
 
     target = scan.get("target")
     if isinstance(target, dict):
+        allowed_target_kinds = completion_binding["allowedTargetKinds"]
+        if len(allowed_target_kinds) == 1:
+            target["kind"] = allowed_target_kinds[0]
         _populate_unsealed_target_binding(target, completion_binding["target"])
 
     scope = scan.get("scope")
