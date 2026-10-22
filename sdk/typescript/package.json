@@ -15,7 +15,7 @@
   "engines": {
     "node": ">=22"
   },
-  "packageManager": "bun@1.4.0",
+  "packageManager": "bun@1.4.4",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -45,13 +45,13 @@
     "format": "prettier --check --ignore-path .gitignore --ignore-path .prettierignore \"**/*.{cjs,mjs,js,ts,json,md}\"",
     "generate:models": "node scripts/generate-models.cjs",
     "generate:models:check": "node scripts/generate-models.cjs --check",
-    "lint": "tsc --noEmit",
+    "lint": "bun check --no-script",
     "test": "bun test --timeout 30000 ./tests-ts",
     "test:unit": "bun run test:coverage",
     "test:coverage": "bun test --coverage --timeout 30000 ./tests-ts",
     "test:smoke": "bun run test:package",
     "test:package": "node scripts/smoke-package.mjs",
-    "types": "bun run generate:models:check && tsc --noEmit"
+    "types": "bun run generate:models:check && bun check --no-script"
   },
   "dependencies": {
     "@inquirer/prompts": "8.5.2",
